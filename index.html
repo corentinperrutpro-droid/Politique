@@ -1,0 +1,483 @@
+<!DOCTYPE html><html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Base de Décision d'État — documentation politique structurée pour la décision publique.">
+  <title>Base de Décision d'État</title>  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">  <link rel="stylesheet" href="styles.css">
+</head><body><header class="header">  <a href="index.html" class="logo">
+    <span class="logo-mark">BDE</span><span>
+  Base de Décision<br>
+  <small>d'État</small>
+</span>
+
+  </a>  <nav class="nav"><a href="index.html">Accueil</a>
+<a href="#explorer">Explorer</a>
+<a href="#recherche">Rechercher</a>
+<a href="#analyser">Analyser</a>
+<a href="#documentation">Documentation</a>
+<a href="#archives">Archives</a>
+
+  </nav>  <button class="menu-button" onclick="toggleMenu()">
+    ☰
+  </button></header><main id="app">  <!-- HERO -->  <section class="hero"><div class="hero-content">
+
+  <div class="eyebrow">
+    DOCUMENTATION POLITIQUE · FRANCE · EUROPE
+  </div>
+
+  <h1>
+    Comprendre la<br>
+    décision publique.
+  </h1>
+
+  <p>
+    Une base structurée pour passer de la donnée
+    à l'arbitrage.
+  </p>
+
+  <p class="hierarchy">
+    Thème → Sous-thème → Catégorie → Sujet
+  </p>
+
+  <div class="search-box">
+
+    <input
+      id="home-search"
+      type="search"
+      placeholder="Rechercher un sujet, une institution, une politique…"
+    >
+
+    <button onclick="searchSite()">
+      Rechercher
+    </button>
+
+  </div>
+
+</div>
+
+
+<aside class="hero-card">
+
+  <div class="eyebrow">
+    ARCHITECTURE DE LA BASE
+  </div>
+
+  <div class="metric">
+    <span>Thèmes</span>
+    <strong>36</strong>
+  </div>
+
+  <div class="metric">
+    <span>Sections par fiche</span>
+    <strong>15</strong>
+  </div>
+
+  <div class="metric">
+    <span>Institutions européennes</span>
+    <strong>3</strong>
+  </div>
+
+  <p>
+    Données avant opinions.<br>
+    Décision avant description.
+  </p>
+
+</aside>
+
+  </section>  <!-- EXPLORER -->  <section id="explorer" class="section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      EXPLORER
+    </div>
+
+    <h2>
+      La carte politique
+    </h2>
+
+  </div>
+
+  <p>
+    Parcourez les grands champs de l'action publique
+    puis descendez jusqu'au sujet documenté.
+  </p>
+
+</div>
+
+
+<div id="themes" class="theme-grid"></div>
+
+  </section>  <!-- PRINCIPES -->  <section class="section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      PRINCIPE ÉDITORIAL
+    </div>
+
+    <h2>
+      Un socle factuel.<br>
+      Une analyse séparée.
+    </h2>
+
+  </div>
+
+</div>
+
+
+<div class="principles-grid">
+
+  <article class="info-card">
+
+    <span class="card-number">01</span>
+
+    <h3>
+      Couche factuelle
+    </h3>
+
+    <p>
+      Faits, données, droit, acteurs,
+      sources primaires et historique.
+    </p>
+
+  </article>
+
+
+  <article class="info-card">
+
+    <span class="card-number">02</span>
+
+    <h3>
+      Couche d'analyse
+    </h3>
+
+    <p>
+      Scénarios, arbitrages,
+      comparaisons et lectures transversales.
+    </p>
+
+  </article>
+
+
+  <article class="info-card">
+
+    <span class="card-number">03</span>
+
+    <h3>
+      Couche partisane
+    </h3>
+
+    <p>
+      Programmes, idées et bilans
+      séparés de la documentation factuelle.
+    </p>
+
+  </article>
+
+</div>
+
+  </section>  <!-- RECHERCHE -->  <section id="recherche" class="section search-section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      RECHERCHE
+    </div>
+
+    <h2>
+      Rechercher dans la base
+    </h2>
+
+  </div>
+
+</div>
+
+
+<div class="large-search">
+
+  <input
+    id="search-input"
+    type="search"
+    placeholder="Énergie, justice, défense, IA…"
+  >
+
+  <button onclick="runSearch()">
+    Rechercher
+  </button>
+
+</div>
+
+
+<div id="search-results"></div>
+
+  </section>  <!-- ANALYSE -->  <section id="analyser" class="section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      ANALYSER
+    </div>
+
+    <h2>
+      Analyse transversale
+    </h2>
+
+  </div>
+
+  <p>
+    Une couche distincte pour les chronologies,
+    comparaisons, scénarios et arbitrages.
+  </p>
+
+</div>
+
+
+<div class="analysis-grid">
+
+  <article class="analysis-card">
+    <span>01</span>
+    <h3>Chronologies</h3>
+    <p>
+      Replacer une décision dans son temps long.
+    </p>
+  </article>
+
+
+  <article class="analysis-card">
+    <span>02</span>
+    <h3>Comparaisons</h3>
+    <p>
+      Comparer politiques publiques,
+      territoires et modèles européens.
+    </p>
+  </article>
+
+
+  <article class="analysis-card">
+    <span>03</span>
+    <h3>Arbitrages</h3>
+    <p>
+      Identifier coûts, bénéfices,
+      risques et points de décision.
+    </p>
+  </article>
+
+
+  <article class="analysis-card">
+    <span>04</span>
+    <h3>Europe</h3>
+    <p>
+      Commission européenne,
+      Parlement européen et Conseil.
+    </p>
+  </article>
+
+</div>
+
+  </section>  <!-- DOCUMENTATION -->  <section id="documentation" class="section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      DOCUMENTATION
+    </div>
+
+    <h2>
+      Sources & références
+    </h2>
+
+  </div>
+
+  <p>
+    Le socle documentaire privilégie
+    les sources primaires.
+  </p>
+
+</div>
+
+
+<div class="documentation-grid">
+
+  <article class="info-card">
+
+    <span class="card-number">01</span>
+
+    <h3>
+      Rapports parlementaires
+    </h3>
+
+    <p>
+      Travaux, commissions, missions
+      d'information et rapports.
+    </p>
+
+  </article>
+
+
+  <article class="info-card">
+
+    <span class="card-number">02</span>
+
+    <h3>
+      Cour des comptes
+    </h3>
+
+    <p>
+      Rapports et analyses
+      de la période documentée.
+    </p>
+
+  </article>
+
+
+  <article class="info-card">
+
+    <span class="card-number">03</span>
+
+    <h3>
+      Sources primaires
+    </h3>
+
+    <p>
+      Légifrance, INSEE,
+      administrations et juridictions.
+    </p>
+
+  </article>
+
+
+  <article class="info-card">
+
+    <span class="card-number">04</span>
+
+    <h3>
+      Glossaire
+    </h3>
+
+    <p>
+      Définitions des notions,
+      instances et acronymes.
+    </p>
+
+  </article>
+
+</div>
+
+  </section>  <!-- ARCHIVES -->  <section id="archives" class="section"><div class="section-header">
+
+  <div>
+
+    <div class="eyebrow">
+      ARCHIVES & MÉTHODOLOGIE
+    </div>
+
+    <h2>
+      Gouvernance de la base
+    </h2>
+
+  </div>
+
+</div>
+
+
+<div class="rules">
+
+  <article>
+    <strong>01</strong>
+    <div>
+      <h3>Le canonique fait foi</h3>
+      <p>
+        La page canonique est l'autorité.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>02</strong>
+    <div>
+      <h3>Fusionner avant d'actualiser</h3>
+      <p>
+        Les doublons doivent être consolidés
+        avant toute mise à jour.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>03</strong>
+    <div>
+      <h3>Un propriétaire unique</h3>
+      <p>
+        Un sujet transversal possède
+        un propriétaire documentaire unique.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>04</strong>
+    <div>
+      <h3>Ne jamais effacer l'incertitude</h3>
+      <p>
+        Les informations obsolètes sont
+        signalées plutôt que silencieusement remplacées.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>05</strong>
+    <div>
+      <h3>Archiver avec transfert</h3>
+      <p>
+        Les contributions uniques sont transférées
+        avant archivage.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>06</strong>
+    <div>
+      <h3>Trois états de chantier</h3>
+      <p>
+        Résolu · inerte · enregistré.
+      </p>
+    </div>
+  </article>
+
+
+  <article>
+    <strong>07</strong>
+    <div>
+      <h3>Contrôler les sources</h3>
+      <p>
+        Les références suspectes sont conservées
+        jusqu'à vérification primaire.
+      </p>
+    </div>
+  </article>
+
+</div>
+
+  </section></main><footer>  <div><strong>
+  BASE DE DÉCISION D'ÉTAT
+</strong>
+
+<p>
+  Données avant opinions ·
+  décision avant description.
+</p>
+
+  </div>  <div>
+    France · Europe
+  </div></footer><script src="app.js"></script></body>
+</html>
