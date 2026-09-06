@@ -18,10 +18,10 @@ const headers = {
   "Content-Type": "application/json"
 };
 
-const MAX_RETRIES = 8;
-const MIN_REQUEST_GAP_MS = 350;
-let lastRequestAt = 0;
 
+const MAX_RETRIES = 8;
+const MIN_REQUEST_GAP_MS = 1200;
+let lastRequestAt = 0;
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -37,37 +37,72 @@ async function waitForRequestSlot() {
 async function notion(path) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await waitForRequestSlot();
-    const response = await fetch(`https://api.notion.com/v1${path}`, { headers });
 
-    if (response.ok) return response.json();
+    const response = await fetch(
+      `https://api.notion.com/v1${path}`,
+      { headers }
+    );
+
+    if (response.ok) {
+      return response.json();
+    }
 
     const body = await response.text();
     const retryAfterHeader = response.headers.get("retry-after");
+
     let retryAfterBody;
     try {
-      retryAfterBody = JSON.parse(body)?.additional_data?.retry_after;
+      retryAfterBody =
+        JSON.parse(body)?.additional_data?.retry_after;
     } catch {
       retryAfterBody = undefined;
     }
 
-    const isRetryable = response.status === 429 || response.status >= 500;
+    const isRetryable =
+      response.status === 429 ||
+      response.status >= 500;
+
     if (!isRetryable || attempt === MAX_RETRIES) {
-      throw new Error(`Notion API ${response.status} ${path}: ${body.slice(0, 800)}`);
+      throw new Error(
+        `Notion API ${response.status} ${path}: ${body.slice(0, 800)}`
+      );
     }
 
-    const retryAfterSeconds = Number(retryAfterHeader ?? retryAfterBody ?? 0);
-    const backoffMs = Math.max(
-      retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 0,
-      Math.min(30_000, 1000 * 2 ** attempt)
+    const retryAfterSeconds =
+      Number(retryAfterHeader ?? retryAfterBody ?? 0);
+
+    // Notion peut imposer un délai précis avec Retry-After.
+    // Sinon, on utilise un backoff progressif assez lent.
+    const exponentialBackoffMs =
+      Math.min(60_000, 5000 * 2 ** attempt);
+
+    const retryDelayMs = Math.max(
+      retryAfterSeconds > 0
+        ? retryAfterSeconds * 1000
+        : 0,
+      exponentialBackoffMs
     );
+
+    // Petite marge aléatoire pour éviter de repartir
+    // exactement en même temps que d'autres requêtes.
+    const jitterMs =
+      Math.floor(Math.random() * 1000);
+
+    const totalDelayMs =
+      retryDelayMs + jitterMs;
 
     console.warn(
-      `Notion API ${response.status} sur ${path} — nouvelle tentative ${attempt + 1}/${MAX_RETRIES} dans ${Math.ceil(backoffMs / 1000)}s.`
+      `Notion API ${response.status} sur ${path} — ` +
+      `nouvelle tentative ${attempt + 1}/${MAX_RETRIES} ` +
+      `dans ${Math.ceil(totalDelayMs / 1000)}s.`
     );
-    await sleep(backoffMs);
+
+    await sleep(totalDelayMs);
   }
 
-  throw new Error(`Notion API: nombre maximal de tentatives atteint pour ${path}`);
+  throw new Error(
+    `Notion API : nombre maximal de tentatives atteint pour ${path}`
+  );
 }
 
 async function allChildren(blockId) {
