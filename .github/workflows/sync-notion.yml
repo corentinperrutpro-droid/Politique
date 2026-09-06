@@ -2,6 +2,10 @@ name: Synchroniser Notion vers le site
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "scripts/sync-notion.mjs"
+      - ".github/workflows/sync-notion.yml"
   schedule:
     - cron: "17 3 * * *"
 
