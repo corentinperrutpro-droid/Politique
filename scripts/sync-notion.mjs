@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 /**
  * Exporte récursivement le dossier Politique Notion vers data.js.
- *
  * Variables requises : NOTION_TOKEN et NOTION_ROOT_ID.
- * Le token doit avoir accès à la page racine et à tous ses descendants.
  */
 import fs from "node:fs/promises";
 
@@ -96,7 +94,6 @@ async function renderBlocks(blocks) {
   const output = [];
   let listType = null;
   let listItems = [];
-
   const flush = () => {
     if (!listItems.length) return;
     output.push(`<${listType}>${listItems.join("")}</${listType}>`);
@@ -126,7 +123,7 @@ async function renderBlocks(blocks) {
 const records = [];
 const visited = new Set();
 
-async function collect(pageId, parentId = null, depth = 0) {
+async function collect(pageId, parentId = null, depth = 0, ancestry = []) {
   const id = pageId.replace(/-/g, "");
   if (visited.has(id)) return;
   visited.add(id);
@@ -135,38 +132,85 @@ async function collect(pageId, parentId = null, depth = 0) {
   const titleProperty = Object.values(page.properties || {}).find(p => p.type === "title");
   const title = titleProperty?.title?.map(x => x.plain_text).join("") || "Sans titre";
   const blocks = await allChildren(id);
-  const html = await renderBlocks(blocks);
-
-  records.push({
+  const record = {
     id,
     title,
     url: `https://www.notion.so/${id}`,
     parentId,
     depth,
+    ancestry,
     lastEditedTime: page.last_edited_time,
-    html
-  });
+    html: await renderBlocks(blocks)
+  };
+  records.push(record);
 
   for (const block of blocks) {
-    if (block.type === "child_page") await collect(block.id, id, depth + 1);
+    if (block.type === "child_page") {
+      await collect(block.id, id, depth + 1, [...ancestry, id]);
+    }
   }
 }
 
 await collect(rootId);
 
 const root = records.find(p => p.id === rootId);
-const themes = records
-  .filter(p => p.parentId === rootId)
-  .map((p, index) => ({
-    num: index + 1,
-    titre: p.title.replace(/^[^\p{L}\p{N}]*/u, "").replace(/^\d+\.\s*/, ""),
-    emoji: p.title.match(/^\S+/u)?.[0] || "",
-    notionId: p.id,
+const rootChildren = records.filter(p => p.parentId === rootId);
+
+// Les pages directement sous la racine sont les thèmes. Les pages de niveau
+// suivant sont les catégories ; les pages suivantes sont les fiches.
+const themeRecords = rootChildren.filter(p => /^\S+\s*\d+\./u.test(p.title));
+const themes = themeRecords.map((themeRecord, index) => {
+  const match = themeRecord.title.match(/^(\S+)\s*(\d+)\.\s*(.*)$/u);
+  const num = Number(match?.[2] || index + 1);
+  const titre = (match?.[3] || themeRecord.title).trim();
+  const categories = records
+    .filter(p => p.parentId === themeRecord.id)
+    .map(category => {
+      const code = category.title.match(/(\d+\.\d+)/)?.[1] || "";
+      return { code, nom: category.title.replace(/^\S+\s*/, "").trim(), pageId: category.id };
+    });
+  const ficheRecords = records.filter(p => p.ancestry.includes(themeRecord.id) && p.depth >= 3);
+  return {
+    num,
+    titre,
+    emoji: match?.[1] || "",
+    notionId: themeRecord.id,
     statut: "Synchronisé depuis Notion",
-    fiches: records.filter(x => x.parentId === p.id && x.depth >= 2).length,
-    categories: [],
-    pageId: p.id
-  }));
+    fiches: ficheRecords.length,
+    categories,
+    pageId: themeRecord.id
+  };
+});
+
+themes.sort((a, b) => a.num - b.num);
+
+const categoryById = new Map();
+records.filter(p => p.depth === 2).forEach(category => {
+  const code = category.title.match(/(\d+\.\d+)/)?.[1] || "";
+  categoryById.set(category.id, code);
+});
+
+const themeById = new Map(themeRecords.map((p, i) => {
+  const num = Number(p.title.match(/\d+/)?.[0] || i + 1);
+  return [p.id, num];
+}));
+
+const fiches = records
+  .filter(p => p.depth >= 3)
+  .map(p => {
+    const category = p.ancestry.map(id => categoryById.get(id)).find(Boolean) || "";
+    const themeId = p.ancestry.find(id => themeById.has(id));
+    return {
+      id: p.id,
+      titre: p.title,
+      theme: themeById.get(themeId) || 0,
+      cat: category,
+      html: p.html,
+      notionId: p.id,
+      notionUrl: p.url,
+      lastEditedTime: p.lastEditedTime
+    };
+  });
 
 const payload = {
   generatedAt: new Date().toISOString(),
@@ -175,9 +219,16 @@ const payload = {
   rootTitle: root?.title || "DOCUMENTATION POLITIQUE",
   pages: records,
   themes,
-  fiches: records
-    .filter(p => p.depth >= 3)
-    .map(p => ({ id: p.id, titre: p.title, html: p.html, notionId: p.id }))
+  fiches,
+  // Index compatible avec l'ancien moteur du site.
+  ficheIndex: Object.fromEntries(
+    fiches.reduce((map, fiche) => {
+      const key = fiche.cat || "uncategorized";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(fiche);
+      return map;
+    }, new Map())
+  )
 };
 
 await fs.writeFile(
@@ -185,4 +236,4 @@ await fs.writeFile(
   `// Généré automatiquement depuis Notion — ne pas modifier à la main.\nconst SITE_DATA = ${JSON.stringify(payload)};\n`,
   "utf8"
 );
-console.log(`Synchronisation terminée : ${records.length} pages exportées.`);
+console.log(`Synchronisation terminée : ${records.length} pages, ${fiches.length} fiches.`);
