@@ -1,0 +1,42 @@
+name: Synchroniser Notion vers le site
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Synchroniser le dossier Politique depuis Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_ROOT_ID: ${{ secrets.NOTION_ROOT_ID }}
+        run: node scripts/sync-notion.mjs
+
+      - name: Vérifier JavaScript
+        run: node --check app.js && node --check data.js && node --check scripts/sync-notion.mjs
+
+      - name: Publier les données synchronisées
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.js
+          if git diff --cached --quiet; then
+            echo "Aucune modification de contenu."
+          else
+            git commit -m "Sync dossier Politique depuis Notion"
+            git push
+          fi
