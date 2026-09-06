@@ -20,20 +20,13 @@ const headers = {
 
 
 const MAX_RETRIES = 8;
-const MIN_REQUEST_GAP_MS = 1200;
+const MIN_REQUEST_GAP_MS = 1500;
 let lastRequestAt = 0;
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function waitForRequestSlot() {
-  const elapsed = Date.now() - lastRequestAt;
-  if (elapsed < MIN_REQUEST_GAP_MS) {
-    await sleep(MIN_REQUEST_GAP_MS - elapsed);
-  }
-  lastRequestAt = Date.now();
-}
-
 async function notion(path) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await waitForRequestSlot();
@@ -58,11 +51,13 @@ async function notion(path) {
       retryAfterBody = undefined;
     }
 
-    const isRetryable =
-      response.status === 429 ||
-      response.status >= 500;
+    const isRateLimited = response.status === 429;
+    const isServerError = response.status >= 500;
 
-    if (!isRetryable || attempt === MAX_RETRIES) {
+    if (
+      (!isRateLimited && !isServerError) ||
+      attempt === MAX_RETRIES
+    ) {
       throw new Error(
         `Notion API ${response.status} ${path}: ${body.slice(0, 800)}`
       );
@@ -71,25 +66,39 @@ async function notion(path) {
     const retryAfterSeconds =
       Number(retryAfterHeader ?? retryAfterBody ?? 0);
 
-    // Notion peut imposer un délai précis avec Retry-After.
-    // Sinon, on utilise un backoff progressif assez lent.
-    const exponentialBackoffMs =
-      Math.min(60_000, 5000 * 2 ** attempt);
+    let delayMs;
 
-    const retryDelayMs = Math.max(
-      retryAfterSeconds > 0
-        ? retryAfterSeconds * 1000
-        : 0,
-      exponentialBackoffMs
-    );
+    if (isRateLimited) {
+      // En cas de 429, on laisse largement le temps
+      // au quota Notion de se rétablir.
+      const rateLimitBackoffMs =
+        Math.min(120_000, 30_000 * 2 ** attempt);
 
-    // Petite marge aléatoire pour éviter de repartir
-    // exactement en même temps que d'autres requêtes.
+      delayMs = Math.max(
+        retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
+          : 0,
+        rateLimitBackoffMs
+      );
+    } else {
+      // Pour les erreurs serveur (502, 503, etc.),
+      // un backoff plus court suffit généralement.
+      const serverBackoffMs =
+        Math.min(60_000, 5000 * 2 ** attempt);
+
+      delayMs = Math.max(
+        retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
+          : 0,
+        serverBackoffMs
+      );
+    }
+
     const jitterMs =
-      Math.floor(Math.random() * 1000);
+      Math.floor(Math.random() * 3000);
 
     const totalDelayMs =
-      retryDelayMs + jitterMs;
+      delayMs + jitterMs;
 
     console.warn(
       `Notion API ${response.status} sur ${path} — ` +
