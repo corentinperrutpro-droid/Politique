@@ -1,7 +1,23 @@
 #!/usr/bin/env node
 /**
- * Exporte récursivement le dossier Politique Notion vers data.js.
- * Variables requises : NOTION_TOKEN et NOTION_ROOT_ID.
+ * Exporte récursivement la base Politique Notion vers data.js.
+ *
+ * Variables requises :
+ *   NOTION_TOKEN
+ *   NOTION_ROOT_ID
+ *
+ * Structure gérée :
+ *   Thème
+ *     → Sous-thème
+ *       → Catégorie
+ *         → Fiche / Sujet
+ *
+ * Le script :
+ *   - parcourt toute l'arborescence ;
+ *   - ne dépend pas d'une profondeur fixe ;
+ *   - met en cache les enfants déjà récupérés ;
+ *   - ralentit les requêtes Notion pour limiter les 429 ;
+ *   - refuse de produire un data.js partiel en cas d'échec API.
  */
 
 import fs from "node:fs/promises";
@@ -20,10 +36,18 @@ const headers = {
   "Content-Type": "application/json"
 };
 
-// Notion limite fortement les appels API.
-// On espace volontairement les requêtes pour éviter les 429.
+/* =========================================================
+   CONFIGURATION API
+   ========================================================= */
+
 const MAX_RETRIES = 6;
-const MIN_REQUEST_GAP_MS = 1500;
+
+/*
+ * On espace fortement les appels.
+ * Le cache ci-dessous évite normalement beaucoup
+ * de requêtes inutiles.
+ */
+const MIN_REQUEST_GAP_MS = 1200;
 
 let lastRequestAt = 0;
 
@@ -41,21 +65,57 @@ async function waitForRequestSlot() {
   lastRequestAt = Date.now();
 }
 
+/* =========================================================
+   CACHE
+   ========================================================= */
+
+const pageCache = new Map();
+const childrenCache = new Map();
+
+/* =========================================================
+   APPEL NOTION
+   ========================================================= */
+
 async function notion(path) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await waitForRequestSlot();
 
-    const response = await fetch(
-      `https://api.notion.com/v1${path}`,
-      { headers }
-    );
+    let response;
+
+    try {
+      response = await fetch(
+        `https://api.notion.com/v1${path}`,
+        { headers }
+      );
+    } catch (error) {
+      if (attempt === MAX_RETRIES) {
+        throw new Error(
+          `Erreur réseau Notion sur ${path}: ${error.message}`
+        );
+      }
+
+      const delayMs =
+        Math.min(60000, 5000 * 2 ** attempt) +
+        Math.floor(Math.random() * 3000);
+
+      console.warn(
+        `Erreur réseau sur ${path} — ` +
+        `nouvelle tentative ${attempt + 1}/${MAX_RETRIES} ` +
+        `dans ${Math.ceil(delayMs / 1000)}s.`
+      );
+
+      await sleep(delayMs);
+      continue;
+    }
 
     if (response.ok) {
       return response.json();
     }
 
     const body = await response.text();
-    const retryAfterHeader = response.headers.get("retry-after");
+
+    const retryAfterHeader =
+      response.headers.get("retry-after");
 
     let retryAfterBody;
 
@@ -66,51 +126,58 @@ async function notion(path) {
       retryAfterBody = undefined;
     }
 
-    const isRateLimited = response.status === 429;
-    const isServerError = response.status >= 500;
+    const isRateLimited =
+      response.status === 429;
+
+    const isServerError =
+      response.status >= 500;
 
     if (
       (!isRateLimited && !isServerError) ||
       attempt === MAX_RETRIES
     ) {
       throw new Error(
-        `Notion API ${response.status} ${path}: ${body.slice(0, 800)}`
+        `Notion API ${response.status} ${path}: ` +
+        `${body.slice(0, 1000)}`
       );
     }
-
-    const retryAfterSeconds =
-      Number(retryAfterHeader ?? retryAfterBody ?? 0);
 
     let delayMs;
 
-    if (isRateLimited) {
-      // En cas de 429, on attend suffisamment longtemps
-      // pour laisser le quota Notion se rétablir.
-      const rateLimitBackoffMs =
-        Math.min(120_000, 30_000 * 2 ** attempt);
+    const retryAfterSeconds =
+      Number(
+        retryAfterHeader ??
+        retryAfterBody ??
+        0
+      );
 
-      delayMs = Math.max(
-        retryAfterSeconds > 0
-          ? retryAfterSeconds * 1000
-          : 0,
-        rateLimitBackoffMs
+    if (isRateLimited) {
+      /*
+       * 429 :
+       * on attend au minimum 30 secondes.
+       * Le délai augmente progressivement.
+       */
+      delayMs = Math.min(
+        180000,
+        30000 * 2 ** attempt
       );
     } else {
-      // Pour les erreurs serveur (502, 503, etc.),
-      // on utilise un backoff progressif.
-      const serverBackoffMs =
-        Math.min(60_000, 5000 * 2 ** attempt);
-
-      delayMs = Math.max(
-        retryAfterSeconds > 0
-          ? retryAfterSeconds * 1000
-          : 0,
-        serverBackoffMs
+      /*
+       * 502 / 503 / 504...
+       */
+      delayMs = Math.min(
+        60000,
+        5000 * 2 ** attempt
       );
     }
 
-    // Petite variation aléatoire pour éviter
-    // des répétitions parfaitement synchronisées.
+    if (retryAfterSeconds > 0) {
+      delayMs = Math.max(
+        delayMs,
+        retryAfterSeconds * 1000
+      );
+    }
+
     const jitterMs =
       Math.floor(Math.random() * 3000);
 
@@ -127,11 +194,39 @@ async function notion(path) {
   }
 
   throw new Error(
-    `Notion API : nombre maximal de tentatives atteint pour ${path}`
+    `Nombre maximal de tentatives atteint pour ${path}`
   );
 }
 
+/* =========================================================
+   PAGE
+   ========================================================= */
+
+async function getPage(pageId) {
+  const id = pageId.replace(/-/g, "");
+
+  if (pageCache.has(id)) {
+    return pageCache.get(id);
+  }
+
+  const page = await notion(`/pages/${id}`);
+
+  pageCache.set(id, page);
+
+  return page;
+}
+
+/* =========================================================
+   ENFANTS D'UNE PAGE / D'UN BLOC
+   ========================================================= */
+
 async function allChildren(blockId) {
+  const id = blockId.replace(/-/g, "");
+
+  if (childrenCache.has(id)) {
+    return childrenCache.get(id);
+  }
+
   const result = [];
   let cursor;
 
@@ -145,18 +240,26 @@ async function allChildren(blockId) {
     }
 
     const page = await notion(
-      `/blocks/${blockId}/children?${params}`
+      `/blocks/${id}/children?${params}`
     );
 
     result.push(...page.results);
 
-    cursor = page.has_more
-      ? page.next_cursor
-      : undefined;
+    cursor =
+      page.has_more
+        ? page.next_cursor
+        : undefined;
+
   } while (cursor);
+
+  childrenCache.set(id, result);
 
   return result;
 }
+
+/* =========================================================
+   HTML
+   ========================================================= */
 
 function escapeHtml(value = "") {
   return String(value)
@@ -195,7 +298,8 @@ function richText(items = []) {
         text =
           `<a href="${escapeAttr(item.href)}" ` +
           `target="_blank" ` +
-          `rel="noopener noreferrer">${text}</a>`;
+          `rel="noopener noreferrer">` +
+          `${text}</a>`;
       }
 
       return text;
@@ -204,12 +308,17 @@ function richText(items = []) {
 }
 
 function blockToHtml(block) {
-  const data = block[block.type] || {};
-  const text = richText(data.rich_text);
+  const data =
+    block[block.type] || {};
+
+  const text =
+    richText(data.rich_text);
 
   switch (block.type) {
     case "paragraph":
-      return text ? `<p>${text}</p>` : "";
+      return text
+        ? `<p>${text}</p>`
+        : "";
 
     case "heading_1":
       return `<h2>${text}</h2>`;
@@ -224,7 +333,9 @@ function blockToHtml(block) {
       return `<blockquote>${text}</blockquote>`;
 
     case "callout":
-      return `<aside class="callout">${text}</aside>`;
+      return (
+        `<aside class="callout">${text}</aside>`
+      );
 
     case "bulleted_list_item":
       return `<li>${text}</li>`;
@@ -235,20 +346,23 @@ function blockToHtml(block) {
     case "to_do":
       return (
         `<p class="todo">` +
-        `${data.checked ? "☑" : "☐"} ${text}` +
+        `${data.checked ? "☑" : "☐"} ` +
+        `${text}` +
         `</p>`
       );
 
-    case "code":
+    case "code": {
+      const code =
+        (data.rich_text || [])
+          .map(x => x.plain_text || "")
+          .join("");
+
       return (
         `<pre><code>` +
-        escapeHtml(
-          (data.rich_text || data.code || [])
-            .map(x => x.plain_text || "")
-            .join("")
-        ) +
+        `${escapeHtml(code)}` +
         `</code></pre>`
       );
+    }
 
     case "divider":
       return "<hr>";
@@ -256,10 +370,13 @@ function blockToHtml(block) {
     case "bookmark":
       return data.url
         ? (
-          `<p><a href="${escapeAttr(data.url)}" ` +
+          `<p>` +
+          `<a href="${escapeAttr(data.url)}" ` +
           `target="_blank" ` +
           `rel="noopener noreferrer">` +
-          `${escapeHtml(data.url)}</a></p>`
+          `${escapeHtml(data.url)}` +
+          `</a>` +
+          `</p>`
         )
         : "";
 
@@ -269,22 +386,32 @@ function blockToHtml(block) {
           ? data.external?.url
           : data.file?.url;
 
-      return url
-        ? (
-          `<figure>` +
-          `<img loading="lazy" ` +
-          `src="${escapeAttr(url)}" ` +
-          `alt="">` +
-          `<figcaption>${text}</figcaption>` +
-          `</figure>`
-        )
-        : "";
+      if (!url) {
+        return "";
+      }
+
+      return (
+        `<figure>` +
+        `<img loading="lazy" ` +
+        `src="${escapeAttr(url)}" ` +
+        `alt="">` +
+        (text
+          ? `<figcaption>${text}</figcaption>`
+          : "") +
+        `</figure>`
+      );
     }
 
     default:
-      return text ? `<p>${text}</p>` : "";
+      return text
+        ? `<p>${text}</p>`
+        : "";
   }
 }
+
+/* =========================================================
+   RENDU DES BLOCS
+   ========================================================= */
 
 async function renderBlocks(blocks) {
   const output = [];
@@ -292,79 +419,150 @@ async function renderBlocks(blocks) {
   let listType = null;
   let listItems = [];
 
-  const flush = () => {
+  async function flushList() {
     if (!listItems.length) {
       return;
     }
 
     output.push(
-      `<${listType}>${listItems.join("")}</${listType}>`
+      `<${listType}>` +
+      `${listItems.join("")}` +
+      `</${listType}>`
     );
 
     listItems = [];
     listType = null;
-  };
+  }
 
   for (const block of blocks) {
-    const nextListType =
+    const currentListType =
       block.type === "bulleted_list_item"
         ? "ul"
         : block.type === "numbered_list_item"
           ? "ol"
           : null;
 
-    if (nextListType) {
+    if (currentListType) {
       if (
         listType &&
-        listType !== nextListType
+        listType !== currentListType
       ) {
-        flush();
+        await flushList();
       }
 
-      listType = nextListType;
+      listType = currentListType;
 
-      let rendered = blockToHtml(block);
+      let html =
+        blockToHtml(block);
 
       if (block.has_children) {
-        rendered += await renderBlocks(
-          await allChildren(block.id)
-        );
+        const children =
+          await allChildren(block.id);
+
+        html +=
+          await renderBlocks(children);
       }
 
-      listItems.push(rendered);
+      listItems.push(html);
+
       continue;
     }
 
-    flush();
+    await flushList();
 
-    let rendered = blockToHtml(block);
+    let html =
+      blockToHtml(block);
 
     if (block.has_children) {
-      rendered += await renderBlocks(
-        await allChildren(block.id)
-      );
+      const children =
+        await allChildren(block.id);
+
+      html +=
+        await renderBlocks(children);
     }
 
-    output.push(rendered);
+    output.push(html);
   }
 
-  flush();
+  await flushList();
 
   return output
     .filter(Boolean)
     .join("\n");
 }
 
+/* =========================================================
+   TITRES / STRUCTURE
+   ========================================================= */
+
+/*
+ * Exemple :
+ *   "🌍 10. Politique étrangère & Géopolitique"
+ *
+ * retourne :
+ *   {
+ *     num: 10,
+ *     emoji: "🌍",
+ *     title: "Politique étrangère & Géopolitique"
+ *   }
+ */
+function parseThemeTitle(title = "") {
+  const match =
+    title.match(
+      /^(\p{Emoji_Presentation}|\p{Emoji}\uFE0F)?\s*(\d+)\.\s*(.+)$/u
+    );
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    num: Number(match[2]),
+    emoji: match[1] || "",
+    title: match[3].trim()
+  };
+}
+
+/*
+ * Exemple :
+ *   "📂 10.1 Politique étrangère et diplomatie"
+ *
+ * retourne :
+ *   "10.1"
+ */
+function extractCategoryCode(title = "") {
+  const match =
+    title.match(
+      /\b(\d+\.\d+)\b/
+    );
+
+  return match?.[1] || "";
+}
+
+/*
+ * Vérifie qu'un titre est une vraie page catégorie.
+ */
+function isCategoryTitle(title = "") {
+  return /^\s*(?:\p{Emoji_Presentation}|\p{Emoji}\uFE0F)?\s*\d+\.\d+\b/u.test(
+    title
+  );
+}
+
+/* =========================================================
+   PARCOURS COMPLET DE L'ARBORESCENCE
+   ========================================================= */
+
 const records = [];
 const visited = new Set();
 
-async function collect(
+async function collectPage({
   pageId,
   parentId = null,
   depth = 0,
   ancestry = []
-) {
-  const id = pageId.replace(/-/g, "");
+}) {
+  const id =
+    pageId.replace(/-/g, "");
 
   if (visited.has(id)) {
     return;
@@ -372,215 +570,472 @@ async function collect(
 
   visited.add(id);
 
-  const page = await notion(`/pages/${id}`);
+  const page =
+    await getPage(id);
 
   const titleProperty =
-    Object.values(page.properties || {})
-      .find(p => p.type === "title");
+    Object.values(
+      page.properties || {}
+    ).find(
+      property =>
+        property.type === "title"
+    );
 
   const title =
     titleProperty?.title
-      ?.map(x => x.plain_text)
-      .join("") ||
+      ?.map(item => item.plain_text)
+      .join("")
+      .trim() ||
     "Sans titre";
 
-  const blocks = await allChildren(id);
+  const blocks =
+    await allChildren(id);
+
+  const childPages =
+    blocks.filter(
+      block =>
+        block.type === "child_page"
+    );
 
   const record = {
     id,
     title,
-    url: `https://www.notion.so/${id}`,
+    url:
+      `https://www.notion.so/${id}`,
     parentId,
     depth,
-    ancestry,
-    lastEditedTime: page.last_edited_time,
-    html: await renderBlocks(blocks)
+    ancestry: [...ancestry],
+    lastEditedTime:
+      page.last_edited_time,
+    html:
+      await renderBlocks(blocks),
+    childPageIds:
+      childPages.map(
+        block => block.id
+      )
   };
 
   records.push(record);
 
-  for (const block of blocks) {
-    if (block.type === "child_page") {
-      await collect(
-        block.id,
-        id,
-        depth + 1,
-        [...ancestry, id]
-      );
-    }
+  /*
+   * On descend dans TOUTES les child_page,
+   * quelle que soit leur profondeur.
+   */
+  for (const child of childPages) {
+    await collectPage({
+      pageId: child.id,
+      parentId: id,
+      depth: depth + 1,
+      ancestry: [
+        ...ancestry,
+        id
+      ]
+    });
   }
 }
 
-await collect(rootId);
+/* =========================================================
+   LANCEMENT DU PARCOURS
+   ========================================================= */
+
+console.log(
+  "Début de la synchronisation Notion..."
+);
+
+await collectPage({
+  pageId: rootId,
+  parentId: null,
+  depth: 0,
+  ancestry: []
+});
+
+console.log(
+  `Arborescence récupérée : ${records.length} pages.`
+);
+
+/* =========================================================
+   RACINE
+   ========================================================= */
 
 const root =
-  records.find(p => p.id === rootId);
-
-const rootChildren =
-  records.filter(p => p.parentId === rootId);
-
-// Les pages directement sous la racine sont les thèmes.
-// Les pages de niveau suivant sont les catégories.
-// Les pages suivantes sont les fiches.
-const themeRecords =
-  rootChildren.filter(
-    p => /^\S+\s*\d+\./u.test(p.title)
+  records.find(
+    record =>
+      record.id === rootId
   );
 
-const themes =
-  themeRecords.map((themeRecord, index) => {
-    const match =
-      themeRecord.title.match(
-        /^(\S+)\s*(\d+)\.\s*(.*)$/u
-      );
+if (!root) {
+  throw new Error(
+    "La page racine Notion n'a pas été récupérée."
+  );
+}
 
-    const num =
-      Number(match?.[2] || index + 1);
+/* =========================================================
+   THÈMES
+   ========================================================= */
 
-    const titre =
-      (
-        match?.[3] ||
-        themeRecord.title
-      ).trim();
+/*
+ * Les thèmes sont les pages directement sous la racine
+ * ayant un titre du type :
+ *
+ *   1. Institutions...
+ *   10. Politique étrangère...
+ *   38. Politique du Handicap
+ */
+const themeRecords =
+  records.filter(record => {
+    if (record.parentId !== rootId) {
+      return false;
+    }
 
-    const categories =
-      records
-        .filter(
-          p => p.parentId === themeRecord.id
-        )
-        .map(category => {
-          const code =
-            category.title.match(
-              /(\d+\.\d+)/
-            )?.[1] || "";
-
-          return {
-            code,
-            nom: category.title
-              .replace(/^\S+\s*/, "")
-              .trim(),
-            pageId: category.id
-          };
-        });
-
-    const ficheRecords =
-      records.filter(
-        p =>
-          p.ancestry.includes(themeRecord.id) &&
-          p.depth >= 3
-      );
-
-    return {
-      num,
-      titre,
-      emoji: match?.[1] || "",
-      notionId: themeRecord.id,
-      statut: "Synchronisé depuis Notion",
-      fiches: ficheRecords.length,
-      categories,
-      pageId: themeRecord.id
-    };
-  });
-
-themes.sort((a, b) => a.num - b.num);
-
-const categoryById = new Map();
-
-records
-  .filter(p => p.depth === 2)
-  .forEach(category => {
-    const code =
-      category.title.match(
-        /(\d+\.\d+)/
-      )?.[1] || "";
-
-    categoryById.set(
-      category.id,
-      code
+    return Boolean(
+      parseThemeTitle(record.title)
     );
   });
 
+console.log(
+  `Thèmes détectés : ${themeRecords.length}.`
+);
+
+/* =========================================================
+   INDEX DES THÈMES
+   ========================================================= */
+
 const themeById =
-  new Map(
-    themeRecords.map((p, i) => {
-      const num =
-        Number(
-          p.title.match(/\d+/)?.[0] ||
-          i + 1
+  new Map();
+
+for (const record of themeRecords) {
+  const parsed =
+    parseThemeTitle(
+      record.title
+    );
+
+  if (!parsed) {
+    continue;
+  }
+
+  themeById.set(
+    record.id,
+    {
+      record,
+      num: parsed.num,
+      emoji: parsed.emoji,
+      titre: parsed.title
+    }
+  );
+}
+
+/* =========================================================
+   CATÉGORIES
+   ========================================================= */
+
+/*
+ * Une catégorie est reconnue grâce à son code :
+ *
+ *   10.1
+ *   10.2
+ *   20.1
+ *   27.5
+ *
+ * On ne suppose PLUS qu'elle est depth === 2.
+ */
+const categoryById =
+  new Map();
+
+for (const record of records) {
+  if (!isCategoryTitle(record.title)) {
+    continue;
+  }
+
+  const code =
+    extractCategoryCode(
+      record.title
+    );
+
+  if (!code) {
+    continue;
+  }
+
+  categoryById.set(
+    record.id,
+    {
+      record,
+      code
+    }
+  );
+}
+
+/* =========================================================
+   TROUVER LE THÈME D'UNE PAGE
+   ========================================================= */
+
+function findThemeForRecord(record) {
+  /*
+   * On cherche d'abord dans les ancêtres.
+   */
+  for (
+    let i = record.ancestry.length - 1;
+    i >= 0;
+    i--
+  ) {
+    const ancestorId =
+      record.ancestry[i];
+
+    if (themeById.has(ancestorId)) {
+      return themeById.get(
+        ancestorId
+      );
+    }
+  }
+
+  /*
+   * Cas particulier : le parent direct est le thème.
+   */
+  if (
+    record.parentId &&
+    themeById.has(record.parentId)
+  ) {
+    return themeById.get(
+      record.parentId
+    );
+  }
+
+  return null;
+}
+
+/* =========================================================
+   TROUVER LA CATÉGORIE D'UNE PAGE
+   ========================================================= */
+
+function findCategoryForRecord(record) {
+  /*
+   * On cherche la catégorie la plus proche
+   * dans les ancêtres.
+   */
+  for (
+    let i = record.ancestry.length - 1;
+    i >= 0;
+    i--
+  ) {
+    const ancestorId =
+      record.ancestry[i];
+
+    if (
+      categoryById.has(
+        ancestorId
+      )
+    ) {
+      return categoryById.get(
+        ancestorId
+      );
+    }
+  }
+
+  /*
+   * Parent direct.
+   */
+  if (
+    record.parentId &&
+    categoryById.has(
+      record.parentId
+    )
+  ) {
+    return categoryById.get(
+      record.parentId
+    );
+  }
+
+  return null;
+}
+
+/* =========================================================
+   CONSTRUCTION DES THÈMES
+   ========================================================= */
+
+const themes =
+  themeRecords
+    .map(record => {
+      const parsed =
+        parseThemeTitle(
+          record.title
         );
 
-      return [p.id, num];
+      if (!parsed) {
+        return null;
+      }
+
+      /*
+       * On récupère toutes les catégories
+       * qui appartiennent à ce thème,
+       * même si elles sont à plusieurs niveaux.
+       */
+      const categories =
+        records
+          .filter(page => {
+            const category =
+              categoryById.get(
+                page.id
+              );
+
+            if (!category) {
+              return false;
+            }
+
+            const theme =
+              findThemeForRecord(
+                page
+              );
+
+            return (
+              theme?.record.id ===
+              record.id
+            );
+          })
+          .map(page => {
+            const category =
+              categoryById.get(
+                page.id
+              );
+
+            return {
+              code:
+                category.code,
+
+              nom:
+                page.title
+                  .replace(
+                    /^\s*(?:\p{Emoji_Presentation}|\p{Emoji}\uFE0F)?\s*/u,
+                    ""
+                  )
+                  .replace(
+                    /^\d+\.\d+\s*/,
+                    ""
+                  )
+                  .trim(),
+
+              pageId:
+                page.id
+            };
+          })
+          .sort((a, b) =>
+            a.code.localeCompare(
+              b.code,
+              "fr",
+              {
+                numeric: true
+              }
+            )
+          );
+
+      /*
+       * Toutes les fiches rattachées
+       * à ce thème.
+       */
+      const ficheCount =
+        records.filter(page => {
+          if (
+            page.id ===
+            record.id
+          ) {
+            return false;
+          }
+
+          const theme =
+            findThemeForRecord(
+              page
+            );
+
+          const category =
+            findCategoryForRecord(
+              page
+            );
+
+          /*
+           * Une catégorie elle-même
+           * n'est pas comptée comme fiche.
+           */
+          const isCategory =
+            categoryById.has(
+              page.id
+            );
+
+          return (
+            theme?.record.id ===
+              record.id &&
+            category &&
+            !isCategory
+          );
+        }).length;
+
+      return {
+        num:
+          parsed.num,
+
+        titre:
+          parsed.title,
+
+        emoji:
+          parsed.emoji,
+
+        notionId:
+          record.id,
+
+        pageId:
+          record.id,
+
+        statut:
+          "Synchronisé depuis Notion",
+
+        fiches:
+          ficheCount,
+
+        categories
+      };
     })
-  );
+    .filter(Boolean)
+    .sort(
+      (a, b) =>
+        a.num - b.num
+    );
+
+/* =========================================================
+   FICHES
+   ========================================================= */
 
 const fiches =
   records
-    .filter(p => p.depth >= 3)
-    .map(p => {
-      const category =
-        p.ancestry
-          .map(id => categoryById.get(id))
-          .find(Boolean) || "";
+    .filter(record => {
+      /*
+       * Une fiche doit être :
+       *   - sous un thème ;
+       *   - sous une catégorie ;
+       *   - mais ne pas être elle-même une catégorie.
+       */
+      if (
+        record.id === rootId
+      ) {
+        return false;
+      }
 
-      const themeId =
-        p.ancestry.find(
-          id => themeById.has(id)
+      if (
+        themeById.has(
+          record.id
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        categoryById.has(
+          record.id
+        )
+      ) {
+        return false;
+      }
+
+      const theme =
+        findThemeForRecord(
+          record
         );
 
-      return {
-        id: p.id,
-        titre: p.title,
-        theme:
-          themeById.get(themeId) || 0,
-        cat: category,
-        html: p.html,
-        notionId: p.id,
-        notionUrl: p.url,
-        lastEditedTime: p.lastEditedTime
-      };
-    });
-
-const payload = {
-  generatedAt: new Date().toISOString(),
-  source: "Notion",
-  rootId,
-  rootTitle:
-    root?.title ||
-    "DOCUMENTATION POLITIQUE",
-  pages: records,
-  themes,
-  fiches,
-
-  // Index compatible avec l'ancien moteur du site.
-  ficheIndex: Object.fromEntries(
-    fiches.reduce(
-      (map, fiche) => {
-        const key =
-          fiche.cat ||
-          "uncategorized";
-
-        if (!map.has(key)) {
-          map.set(key, []);
-        }
-
-        map.get(key).push(fiche);
-
-        return map;
-      },
-      new Map()
-    )
-  )
-};
-
-await fs.writeFile(
-  "data.js",
-  `// Généré automatiquement depuis Notion — ne pas modifier à la main.\n` +
-  `const SITE_DATA = ${JSON.stringify(payload)};\n`,
-  "utf8"
-);
-
-console.log(
-  `Synchronisation terminée : ` +
-  `${records.length} pages, ` +
-  `${fiches.length} fiches.`
-);
+      const category =
+        findCategoryForRecord(
