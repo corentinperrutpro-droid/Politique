@@ -18,13 +18,56 @@ const headers = {
   "Content-Type": "application/json"
 };
 
-async function notion(path) {
-  const response = await fetch(`https://api.notion.com/v1${path}`, { headers });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Notion API ${response.status} ${path}: ${body.slice(0, 800)}`);
+const MAX_RETRIES = 8;
+const MIN_REQUEST_GAP_MS = 350;
+let lastRequestAt = 0;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForRequestSlot() {
+  const elapsed = Date.now() - lastRequestAt;
+  if (elapsed < MIN_REQUEST_GAP_MS) {
+    await sleep(MIN_REQUEST_GAP_MS - elapsed);
   }
-  return response.json();
+  lastRequestAt = Date.now();
+}
+
+async function notion(path) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await waitForRequestSlot();
+    const response = await fetch(`https://api.notion.com/v1${path}`, { headers });
+
+    if (response.ok) return response.json();
+
+    const body = await response.text();
+    const retryAfterHeader = response.headers.get("retry-after");
+    let retryAfterBody;
+    try {
+      retryAfterBody = JSON.parse(body)?.additional_data?.retry_after;
+    } catch {
+      retryAfterBody = undefined;
+    }
+
+    const isRetryable = response.status === 429 || response.status >= 500;
+    if (!isRetryable || attempt === MAX_RETRIES) {
+      throw new Error(`Notion API ${response.status} ${path}: ${body.slice(0, 800)}`);
+    }
+
+    const retryAfterSeconds = Number(retryAfterHeader ?? retryAfterBody ?? 0);
+    const backoffMs = Math.max(
+      retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : 0,
+      Math.min(30_000, 1000 * 2 ** attempt)
+    );
+
+    console.warn(
+      `Notion API ${response.status} sur ${path} — nouvelle tentative ${attempt + 1}/${MAX_RETRIES} dans ${Math.ceil(backoffMs / 1000)}s.`
+    );
+    await sleep(backoffMs);
+  }
+
+  throw new Error(`Notion API: nombre maximal de tentatives atteint pour ${path}`);
 }
 
 async function allChildren(blockId) {
