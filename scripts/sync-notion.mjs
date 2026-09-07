@@ -26,7 +26,7 @@ function queueRequest(fn) {
   return run;
 }
 
-async function notion(path, { method = "GET", body = undefined } = {}) {
+async function notion(path) {
   return queueRequest(async () => {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const elapsed = Date.now() - lastRequestAt;
@@ -39,13 +39,10 @@ async function notion(path, { method = "GET", body = undefined } = {}) {
 
       try {
         response = await fetch(`https://api.notion.com/v1${path}`, {
-          method,
           headers: {
             Authorization: `Bearer ${NOTION_TOKEN}`,
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
+            "Notion-Version": "2022-06-28"
           },
-          body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal
         });
       } catch (error) {
@@ -130,44 +127,14 @@ async function getChildren(blockId) {
   return results;
 }
 
-// ============================================================
-// Arborescence : une seule requête Search par tranche de 100 pages
-// au lieu d'une requête /blocks/:id/children pour chaque page.
-// ============================================================
-
-async function searchAllPages() {
-  const pages = [];
-  let cursor = null;
-
-  do {
-    const body = { page_size: 100, filter: { property: "object", value: "page" } };
-    if (cursor) body.start_cursor = cursor;
-
-    const data = await notion("/search", { method: "POST", body });
-    pages.push(...(data.results || []));
-    cursor = data.has_more ? data.next_cursor : null;
-
-    console.log(`   ↳ ${pages.length} pages Notion indexées...`);
-  } while (cursor);
-
-  return pages;
-}
-
+// Lecture de l'arborescence réelle depuis les blocs enfants de Notion.
+// C'est plus fiable que /search : les pages imbriquées sous le dossier racine
+// sont ainsi récupérées avec leur parent exact.
 async function collectPageTree() {
-  const pages = await searchAllPages();
-  const byParent = new Map();
-
-  for (const page of pages) {
-    const parentId = page.parent?.type === "page_id" ? page.parent.page_id : null;
-    if (!parentId) continue;
-    if (!byParent.has(parentId)) byParent.set(parentId, []);
-    byParent.get(parentId).push(page);
-  }
-
   const records = [];
   const visited = new Set();
 
-  function walk(page, parentId, depth, ancestry) {
+  async function walkPage(page, parentId, depth, ancestry) {
     if (!page || visited.has(page.id)) return;
     visited.add(page.id);
 
@@ -180,20 +147,26 @@ async function collectPageTree() {
     };
     records.push(record);
 
-    const children = byParent.get(page.id) || [];
+    const children = await getChildren(page.id);
     for (const child of children) {
-      walk(child, page.id, depth + 1, [...ancestry, page.id]);
+      if (child.type !== "child_page") continue;
+
+      const childPage = {
+        id: child.id,
+        properties: {
+          title: {
+            type: "title",
+            title: child.child_page?.title ? [{ plain_text: child.child_page.title }] : []
+          }
+        }
+      };
+
+      await walkPage(childPage, page.id, depth + 1, [...ancestry, page.id]);
     }
   }
 
-  const root = pages.find(page => page.id === ROOT_PAGE_ID);
-
-  if (!root) {
-    const rootPage = await getPage(ROOT_PAGE_ID);
-    walk(rootPage, null, 0, []);
-  } else {
-    walk(root, null, 0, []);
-  }
+  const root = await getPage(ROOT_PAGE_ID);
+  await walkPage(root, null, 0, []);
 
   return records;
 }
@@ -268,7 +241,7 @@ async function getPageContent(pageId) {
 }
 
 console.log("🔄 Synchronisation Notion → site");
-console.log("📚 Lecture de l'arborescence via l'index Notion...");
+console.log("📚 Lecture de l'arborescence réelle Notion...");
 
 const records = await collectPageTree();
 console.log(`📄 Pages trouvées : ${records.length}`);
