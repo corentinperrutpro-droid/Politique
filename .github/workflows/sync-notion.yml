@@ -13,10 +13,10 @@ permissions:
   contents: write
 
 # Une seule synchronisation à la fois.
-# Si une nouvelle exécution démarre, l'ancienne est automatiquement annulée.
+# Une nouvelle exécution attend la fin de celle en cours au lieu de l'annuler.
 concurrency:
   group: sync-notion
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
