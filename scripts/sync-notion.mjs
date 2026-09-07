@@ -8,12 +8,12 @@ if (!ROOT_PAGE_ID) throw new Error("NOTION_ROOT_PAGE_ID manquant.");
 
 const OUTPUT_FILE = "data.js";
 const MAX_RETRIES = 5;
-const MIN_REQUEST_GAP_MS = 350;
 const REQUEST_TIMEOUT_MS = 30000;
+const MIN_REQUEST_GAP_MS = 350;
+const MAX_DEPTH = 20;
 
 let nextRequestAt = 0;
 const childrenCache = new Map();
-const pageCache = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -29,13 +29,11 @@ async function waitForRequestSlot() {
 async function notion(path) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     await waitForRequestSlot();
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    let response;
 
     try {
-      response = await fetch(`https://api.notion.com/v1${path}`, {
+      const response = await fetch(`https://api.notion.com/v1${path}`, {
         headers: {
           Authorization: `Bearer ${NOTION_TOKEN}`,
           "Notion-Version": "2022-06-28",
@@ -43,28 +41,20 @@ async function notion(path) {
         },
         signal: controller.signal
       });
-    } catch (error) {
+
       clearTimeout(timeout);
-      if (attempt >= MAX_RETRIES) {
-        throw new Error(`Erreur réseau Notion après ${MAX_RETRIES} tentatives sur ${path}: ${error?.message || error}`);
+      if (response.ok) return response.json();
+
+      const text = await response.text();
+      const retryAfter = Number(response.headers.get("retry-after"));
+      if (response.status !== 429 && response.status < 500) {
+        throw new Error(`Notion API ${response.status} sur ${path}: ${text}`);
       }
-      const waitMs = Math.min(2000 * 2 ** attempt, 30000);
-      console.log(`Erreur réseau Notion sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
-      await sleep(waitMs);
-      continue;
-    }
 
-    clearTimeout(timeout);
-
-    if (response.ok) return response.json();
-
-    const text = await response.text();
-    const retryAfter = Number(response.headers.get("retry-after"));
-
-    if (response.status === 429 || response.status >= 500) {
       if (attempt >= MAX_RETRIES) {
         throw new Error(`Notion API ${response.status} après ${MAX_RETRIES} tentatives sur ${path}: ${text}`);
       }
+
       const base = response.status === 429 ? 30000 : 5000;
       const cap = response.status === 429 ? 180000 : 60000;
       const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
@@ -72,25 +62,24 @@ async function notion(path) {
         : Math.min(base * 2 ** attempt, cap);
       console.log(`Notion API ${response.status} sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
       await sleep(waitMs);
-      continue;
+    } catch (error) {
+      clearTimeout(timeout);
+      if (error?.message?.startsWith("Notion API ")) throw error;
+      if (attempt >= MAX_RETRIES) {
+        throw new Error(`Erreur réseau Notion après ${MAX_RETRIES} tentatives sur ${path}: ${error?.message || error}`);
+      }
+      const waitMs = Math.min(2000 * 2 ** attempt, 30000);
+      console.log(`Erreur réseau Notion sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
+      await sleep(waitMs);
     }
-
-    throw new Error(`Notion API ${response.status} sur ${path}: ${text}`);
   }
-}
-
-async function getPage(pageId) {
-  if (!pageCache.has(pageId)) pageCache.set(pageId, notion(`/pages/${pageId}`));
-  return pageCache.get(pageId);
 }
 
 async function getChildren(blockId) {
   if (childrenCache.has(blockId)) return childrenCache.get(blockId);
-
   const promise = (async () => {
     const results = [];
     let cursor = null;
-
     do {
       const params = new URLSearchParams({ page_size: "100" });
       if (cursor) params.set("start_cursor", cursor);
@@ -98,10 +87,8 @@ async function getChildren(blockId) {
       results.push(...(data.results || []));
       cursor = data.has_more ? data.next_cursor : null;
     } while (cursor);
-
     return results;
   })();
-
   childrenCache.set(blockId, promise);
   return promise;
 }
@@ -110,66 +97,59 @@ function richTextToPlain(richText = []) {
   return richText.map(item => item?.plain_text || "").join("").trim();
 }
 
-function getPageTitle(page) {
-  const property = Object.values(page.properties || {}).find(p => p.type === "title");
-  return richTextToPlain(property?.title || "");
-}
-
-function childPageTitle(block) {
-  return block.child_page?.title || "";
-}
-
-function cleanTitle(title) {
+function cleanTitle(title = "") {
   return title.replace(/\s+/g, " ").trim();
 }
 
-function parseTheme(title) {
-  const match = title.match(/^\s*(\d+)\.\s+(.+)$/u);
+function childPageTitle(block) {
+  return cleanTitle(block.child_page?.title || "");
+}
+
+function parseNumberedTitle(title) {
+  const match = cleanTitle(title).match(/^\s*(\d+)\.(?:\s+)?(.+)$/u);
   return match ? { number: Number(match[1]), title: match[2].trim() } : null;
 }
 
-function parseCategory(title) {
-  const match = title.match(/^\s*(\d+)\.(\d+)\.?\s+(.+)$/u);
-  if (!match) return null;
-  return {
-    themeNumber: Number(match[1]),
-    categoryNumber: Number(match[2]),
-    title: match[3].trim(),
-    code: `${match[1]}.${match[2]}`
-  };
+function pageTitleFromBlocks(blocks) {
+  const titleBlock = blocks.find(block => block.type === "child_page");
+  return titleBlock ? childPageTitle(titleBlock) : "";
 }
 
-async function collectTree() {
-  const records = [];
-  const visited = new Set();
-  const root = await getPage(ROOT_PAGE_ID);
+async function getPageTitle(pageId) {
+  const data = await notion(`/pages/${pageId}`);
+  const property = Object.values(data.properties || {}).find(p => p.type === "title");
+  return richTextToPlain(property?.title || []);
+}
 
-  async function walk(pageId, title, parentId, ancestry, depth) {
-    if (visited.has(pageId)) return;
-    visited.add(pageId);
+async function buildNode(pageId, title, parentId, depth, path = []) {
+  if (depth > MAX_DEPTH) throw new Error(`Profondeur maximale dépassée (${MAX_DEPTH}) sur ${pageId}.`);
 
-    records.push({ id: pageId, title: cleanTitle(title), parentId, ancestry, depth });
+  const blocks = await getChildren(pageId);
+  const childPages = blocks.filter(block => block.type === "child_page");
+  const node = {
+    id: pageId,
+    title: cleanTitle(title),
+    parentId,
+    depth,
+    path: [...path, cleanTitle(title)],
+    children: []
+  };
 
-    const children = await getChildren(pageId);
-    const childPages = children.filter(block => block.type === "child_page");
-
-    // Les appels sont cadencés à ~3/s, mais peuvent être en vol simultanément.
-    // Cela évite d'additionner la latence réseau de chaque branche.
-    await Promise.all(childPages.map(child => walk(
-      child.id,
-      childPageTitle(child),
-      pageId,
-      [...ancestry, pageId],
-      depth + 1
-    )));
-
-    if (records.length >= 100 && records.length % 100 === 0) {
-      console.log(`   ↳ ${records.length} pages parcourues...`);
-    }
+  if (!childPages.length) {
+    node.type = "fiche";
+    node.content = await renderBlocks(blocks);
+    return node;
   }
 
-  await walk(ROOT_PAGE_ID, getPageTitle(root), null, [], 0);
-  return records;
+  node.type = "folder";
+  // Les branches sont construites en parallèle, mais chaque enfant conserve
+  // explicitement son parent. On ne reconstruit jamais la hiérarchie à partir
+  // d'une liste globale dont l'ordre pourrait changer.
+  node.children = await Promise.all(childPages.map(child =>
+    buildNode(child.id, childPageTitle(child), pageId, depth + 1, node.path)
+  ));
+
+  return node;
 }
 
 function blockRichText(block) {
@@ -179,7 +159,6 @@ function blockRichText(block) {
 
 async function renderBlocks(blocks) {
   const output = [];
-
   for (const block of blocks) {
     const type = block.type;
     const text = blockRichText(block);
@@ -202,108 +181,77 @@ async function renderBlocks(blocks) {
       if (nested) output.push(nested);
     }
   }
-
   return output.join("\n\n").trim();
 }
 
-async function getPageContent(pageId) {
-  return renderBlocks(await getChildren(pageId));
+function flattenFiches(node, ancestors = [], result = []) {
+  const nextAncestors = [...ancestors, node];
+  if (node.type === "fiche") {
+    const numbered = [...nextAncestors].reverse().find(item => parseNumberedTitle(item.title));
+    const theme = nextAncestors.find(item => item.depth === 1 && parseNumberedTitle(item.title));
+    result.push({
+      id: node.id,
+      titre: node.title,
+      html: node.content || "",
+      path: node.path,
+      theme: theme ? parseNumberedTitle(theme.title)?.number : null,
+      cat: numbered ? cleanTitle(numbered.title).split(/\s+/u)[0] : ""
+    });
+    return result;
+  }
+  for (const child of node.children || []) flattenFiches(child, nextAncestors, result);
+  return result;
+}
+
+function countNodes(node) {
+  return 1 + (node.children || []).reduce((sum, child) => sum + countNodes(child), 0);
+}
+
+function maxDepth(node) {
+  return Math.max(node.depth, ...(node.children || []).map(maxDepth));
 }
 
 console.log("🔄 Synchronisation Notion → site");
-console.log("📚 Lecture de l'arborescence réelle depuis la page racine...");
+console.log("📚 Lecture récursive de l'arborescence réelle depuis la page racine...");
 
-const records = await collectTree();
-console.log(`📄 Pages trouvées : ${records.length}`);
+const rootTitle = cleanTitle(await getPageTitle(ROOT_PAGE_ID));
+const root = {
+  id: ROOT_PAGE_ID,
+  title: rootTitle,
+  parentId: null,
+  depth: 0,
+  path: [rootTitle],
+  type: "root",
+  children: []
+};
 
-const themes = records
-  .filter(record => record.parentId === ROOT_PAGE_ID)
-  .map(record => {
-    const parsed = parseTheme(record.title);
-    return parsed ? { ...record, ...parsed } : null;
-  })
-  .filter(Boolean)
-  .sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
+const rootBlocks = await getChildren(ROOT_PAGE_ID);
+const rootPages = rootBlocks.filter(block => block.type === "child_page");
+root.children = await Promise.all(rootPages.map(child =>
+  buildNode(child.id, childPageTitle(child), ROOT_PAGE_ID, 1, [rootTitle])
+));
 
+const themes = root.children
+  .filter(node => parseNumberedTitle(node.title))
+  .sort((a, b) => (parseNumberedTitle(a.title).number - parseNumberedTitle(b.title).number));
+
+const fiches = themes.flatMap(theme => flattenFiches(theme));
+const totalNodes = themes.reduce((sum, theme) => sum + countNodes(theme), 0);
+const deepest = themes.length ? Math.max(...themes.map(maxDepth)) : 0;
+
+console.log(`📄 Nœuds sous la racine : ${root.children.length}`);
 console.log(`🏛️ Thèmes détectés : ${themes.length}`);
-if (!themes.length) throw new Error("Aucun thème détecté. data.js ne sera PAS modifié.");
+console.log(`📝 Fiches terminales détectées : ${fiches.length}`);
+console.log(`🧭 Nœuds structurants : ${totalNodes}`);
+console.log(`↕️ Profondeur maximale : ${deepest}`);
 
-const themeById = new Map(themes.map(theme => [theme.id, theme]));
+if (!themes.length) throw new Error("Aucun thème numéroté détecté. data.js ne sera PAS modifié.");
+if (!fiches.length) throw new Error("Aucune fiche terminale détectée. data.js ne sera PAS modifié.");
 
-const categories = records
-  .filter(record => themeById.has(record.parentId))
-  .map(record => {
-    const parsed = parseCategory(record.title);
-    return parsed ? { ...record, ...parsed } : null;
-  })
-  .filter(Boolean)
-  .sort((a, b) => a.themeNumber - b.themeNumber || a.categoryNumber - b.categoryNumber || a.id.localeCompare(b.id));
-
-console.log(`📂 Catégories détectées : ${categories.length}`);
-if (!categories.length) throw new Error("Aucune catégorie détectée. data.js ne sera PAS modifié.");
-
-const categoryIds = new Set(categories.map(category => category.id));
-const ficheRecords = records.filter(record =>
-  !categoryIds.has(record.id) && record.ancestry.some(id => categoryIds.has(id))
-);
-
-console.log(`📝 Fiches détectées : ${ficheRecords.length}`);
-if (!ficheRecords.length) throw new Error("Aucune fiche détectée. data.js ne sera PAS modifié.");
-
-const outputThemes = [];
-const outputFiches = [];
-
-for (const theme of themes) {
-  console.log(`\n🏛️ Thème ${theme.number} — ${theme.title}`);
-
-  const themeCategories = categories
-    .filter(category => category.parentId === theme.id)
-    .sort((a, b) => a.categoryNumber - b.categoryNumber || a.id.localeCompare(b.id));
-
-  console.log(`   📂 ${themeCategories.length} catégories`);
-  const outputCategories = [];
-
-  for (const category of themeCategories) {
-    console.log(`   📁 ${category.code} — ${category.title}`);
-
-    const fiches = ficheRecords
-      .filter(fiche => fiche.ancestry.includes(category.id))
-      .sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
-
-    console.log(`      📝 ${fiches.length} fiches`);
-    outputCategories.push({ code: category.code, nom: category.title });
-
-    const ficheData = await Promise.all(fiches.map(async fiche => ({
-      id: fiche.id,
-      titre: fiche.title,
-      cat: category.code,
-      theme: theme.number,
-      html: await getPageContent(fiche.id)
-    })));
-
-    outputFiches.push(...ficheData);
-  }
-
-  outputThemes.push({
-    num: theme.number,
-    titre: theme.title,
-    emoji: "",
-    notionId: theme.id,
-    statut: "",
-    fiches: themeCategories.reduce(
-      (count, category) => count + ficheRecords.filter(fiche => fiche.ancestry.includes(category.id)).length,
-      0
-    ),
-    categories: outputCategories
-  });
-}
-
-if (!outputFiches.length) throw new Error("Aucune fiche avec contenu détectée. data.js ne sera PAS remplacé.");
-
-const emptyContent = outputFiches.filter(fiche => !fiche.html).length;
-console.log(`📦 Fiches avec contenu : ${outputFiches.length - emptyContent}/${outputFiches.length}`);
+const emptyContent = fiches.filter(fiche => !fiche.html).length;
+console.log(`📦 Fiches avec contenu : ${fiches.length - emptyContent}/${fiches.length}`);
 if (emptyContent > 0) console.log(`⚠️ ${emptyContent} fiches ont un contenu vide.`);
 
-const output = `// Données générées depuis Notion — ne pas modifier manuellement.\nconst SITE_DATA = ${JSON.stringify({ themes: outputThemes, fiches: outputFiches }, null, 2)};\n`;
+const output = `// Données générées depuis Notion — ne pas modifier manuellement.\nconst SITE_DATA = ${JSON.stringify({ root, themes, fiches }, null, 2)};\n`;
 await fs.writeFile(OUTPUT_FILE, output, "utf8");
-console.log(`\n✅ ${OUTPUT_FILE} généré avec succès : ${outputFiches.length} fiches.`);
+console.log(`\n✅ ${OUTPUT_FILE} généré avec succès : ${fiches.length} fiches terminales.`);
