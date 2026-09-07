@@ -27,7 +27,7 @@ jobs:
       - name: Synchroniser le dossier Politique depuis Notion
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_ROOT_ID: ${{ secrets.NOTION_ROOT_ID }}
+          NOTION_ROOT_PAGE_ID: ${{ secrets.NOTION_ROOT_ID }}
         run: node scripts/sync-notion.mjs
 
       - name: Vérifier JavaScript
