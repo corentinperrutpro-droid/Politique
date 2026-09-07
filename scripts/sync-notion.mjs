@@ -9,7 +9,6 @@ const REQUEST_TIMEOUT_MS = 30000;
 const MIN_REQUEST_GAP_MS = 350;
 const MAX_DEPTH = 50;
 const ROOT_TITLE = "🏛️ DOCUMENTATION POLITIQUE — Base de Décision d'État";
-const EXCLUDED_PUBLIC_TITLES = new Set(["registres", "audit"]);
 
 if (!NOTION_TOKEN) throw new Error("NOTION_TOKEN manquant.");
 if (!CONFIGURED_ROOT_ID) throw new Error("NOTION_ROOT_PAGE_ID manquant.");
@@ -73,7 +72,13 @@ function escapeHtml(value = "") {
 }
 function normalizeId(id) { return String(id || "").replace(/-/g, "").toLowerCase(); }
 function sameId(a, b) { return normalizeId(a) === normalizeId(b); }
-function isExcludedPublicPage(title = "") { return EXCLUDED_PUBLIC_TITLES.has(cleanTitle(title).toLocaleLowerCase("fr-FR")); }
+function normalizeTitleForExclusion(title = "") {
+  return cleanTitle(title).replace(/^[^\p{L}\p{N}]+/u, "").toLocaleLowerCase("fr-FR");
+}
+function isExcludedPublicPage(title = "") {
+  const normalized = normalizeTitleForExclusion(title);
+  return /^(?:registres?|audit)\b/u.test(normalized);
+}
 
 async function getPageTitle(pageId) {
   const data = await notion(`/pages/${pageId}`);
