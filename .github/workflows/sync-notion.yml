@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "scripts/sync-notion.mjs"
+      - "app.js"
       - ".github/workflows/sync-notion.yml"
   schedule:
     - cron: "17 3 * * *"
@@ -13,7 +14,6 @@ permissions:
   contents: write
 
 # Une seule synchronisation à la fois.
-# Une nouvelle exécution attend la fin de celle en cours au lieu de l'annuler.
 concurrency:
   group: sync-notion
   cancel-in-progress: false
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Récupérer le dépôt
         uses: actions/checkout@v5
@@ -32,7 +32,7 @@ jobs:
           node-version: 24
 
       - name: Synchroniser le dossier Politique depuis Notion
-        timeout-minutes: 15
+        timeout-minutes: 30
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_ROOT_PAGE_ID: ${{ secrets.NOTION_ROOT_ID }}
