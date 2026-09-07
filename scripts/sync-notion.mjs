@@ -72,70 +72,46 @@ async function notion(path) {
       }
 
       const text = await response.text();
-
       const retryAfterHeader = response.headers.get("retry-after");
 
       if (response.status === 429) {
         if (attempt >= MAX_RETRIES) {
-          throw new Error(
-            `Notion API 429 après ${MAX_RETRIES} tentatives sur ${path}`
-          );
+          throw new Error(`Notion API 429 après ${MAX_RETRIES} tentatives sur ${path}`);
         }
 
         let waitMs;
 
         if (retryAfterHeader) {
           const retrySeconds = Number(retryAfterHeader);
-
-          if (Number.isFinite(retrySeconds)) {
-            waitMs = retrySeconds * 1000;
-          }
+          if (Number.isFinite(retrySeconds)) waitMs = retrySeconds * 1000;
         }
 
         if (!waitMs) {
-          waitMs = Math.min(
-            30000 * Math.pow(2, attempt),
-            180000
-          );
+          waitMs = Math.min(30000 * Math.pow(2, attempt), 180000);
         }
 
-        // Petit délai aléatoire pour éviter les collisions.
         waitMs += Math.floor(Math.random() * 5000);
 
-        console.log(
-          `Notion API 429 sur ${path} — nouvelle tentative ${
-            attempt + 1
-          }/${MAX_RETRIES} dans ${Math.round(waitMs / 1000)}s.`
-        );
-
+        console.log(`Notion API 429 sur ${path} — nouvelle tentative ${attempt + 1}/${MAX_RETRIES} dans ${Math.round(waitMs / 1000)}s.`);
         await sleep(waitMs);
         continue;
       }
 
       if (response.status >= 500 && response.status <= 599) {
         if (attempt >= MAX_RETRIES) {
-          throw new Error(
-            `Notion API ${response.status} après ${MAX_RETRIES} tentatives sur ${path}: ${text}`
-          );
+          throw new Error(`Notion API ${response.status} après ${MAX_RETRIES} tentatives sur ${path}: ${text}`);
         }
 
         const waitMs =
           Math.min(5000 * Math.pow(2, attempt), 60000) +
           Math.floor(Math.random() * 3000);
 
-        console.log(
-          `Notion API ${response.status} sur ${path} — nouvelle tentative ${
-            attempt + 1
-          }/${MAX_RETRIES} dans ${Math.round(waitMs / 1000)}s.`
-        );
-
+        console.log(`Notion API ${response.status} sur ${path} — nouvelle tentative ${attempt + 1}/${MAX_RETRIES} dans ${Math.round(waitMs / 1000)}s.`);
         await sleep(waitMs);
         continue;
       }
 
-      throw new Error(
-        `Notion API ${response.status} sur ${path}: ${text}`
-      );
+      throw new Error(`Notion API ${response.status} sur ${path}: ${text}`);
     }
   });
 }
@@ -162,9 +138,7 @@ function getPageTitle(page) {
 function getBlockText(block) {
   const value = block[block.type];
 
-  if (!value) {
-    return "";
-  }
+  if (!value) return "";
 
   return richTextToPlain(value.rich_text || []);
 }
@@ -185,7 +159,6 @@ async function getPage(pageId) {
   }
 
   const page = await notion(`/pages/${pageId}`);
-
   pageCache.set(pageId, page);
 
   return page;
@@ -208,16 +181,11 @@ async function getChildren(blockId) {
       page_size: "100"
     });
 
-    if (cursor) {
-      params.set("start_cursor", cursor);
-    }
+    if (cursor) params.set("start_cursor", cursor);
 
-    const data = await notion(
-      `/blocks/${blockId}/children?${params.toString()}`
-    );
+    const data = await notion(`/blocks/${blockId}/children?${params.toString()}`);
 
     results.push(...(data.results || []));
-
     cursor = data.has_more ? data.next_cursor : null;
   } while (cursor);
 
@@ -244,16 +212,11 @@ async function collectPageTree(pageId, parentId = null, depth = 0, ancestry = []
   };
 
   const children = await getChildren(pageId);
-
-  const childPages = children.filter(
-    block => block.type === "child_page"
-  );
+  const childPages = children.filter(block => block.type === "child_page");
 
   for (const child of childPages) {
-    const childId = child.id;
-
     await collectPageTree(
-      childId,
+      child.id,
       pageId,
       depth + 1,
       [...ancestry, pageId]
@@ -269,13 +232,21 @@ async function collectPageTree(pageId, parentId = null, depth = 0, ancestry = []
 
 const records = [];
 
-async function walkPages(pageId, parentId = null, depth = 0, ancestry = []) {
-  const page = await getPage(pageId);
+// Optimisation importante : les blocs child_page contiennent déjà leur titre.
+// On évite donc un appel /pages/:id pour chaque page de l'arborescence.
+// Le seul appel /pages est conservé pour la racine.
+async function walkPages(pageId, parentId = null, depth = 0, ancestry = [], knownTitle = null) {
+  let title;
 
-  const title = cleanTitle(getPageTitle(page));
+  if (knownTitle !== null) {
+    title = cleanTitle(knownTitle);
+  } else {
+    const page = await getPage(pageId);
+    title = cleanTitle(getPageTitle(page));
+  }
 
   const record = {
-    id: page.id,
+    id: pageId,
     title,
     parentId,
     depth,
@@ -287,15 +258,16 @@ async function walkPages(pageId, parentId = null, depth = 0, ancestry = []) {
   const children = await getChildren(pageId);
 
   for (const child of children) {
-    if (child.type !== "child_page") {
-      continue;
-    }
+    if (child.type !== "child_page") continue;
+
+    const childTitle = cleanTitle(child.child_page?.title || "");
 
     await walkPages(
       child.id,
       pageId,
       depth + 1,
-      [...ancestry, pageId]
+      [...ancestry, pageId],
+      childTitle
     );
   }
 }
@@ -305,19 +277,12 @@ async function walkPages(pageId, parentId = null, depth = 0, ancestry = []) {
 // ============================================================
 
 function parseTheme(title) {
-  const match = title.match(
-    /(?:^|\s)(\d+)\.\s*(.+)$/u
-  );
+  const match = title.match(/(?:^|\s)(\d+)\.\s*(.+)$/u);
 
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
 
   const number = Number(match[1]);
-
-  if (!Number.isInteger(number)) {
-    return null;
-  }
+  if (!Number.isInteger(number)) return null;
 
   return {
     number,
@@ -326,13 +291,9 @@ function parseTheme(title) {
 }
 
 function parseCategory(title) {
-  const match = title.match(
-    /(?:^|\s)(\d+)\.(\d+)\s+(.+)$/u
-  );
+  const match = title.match(/(?:^|\s)(\d+)\.(\d+)\s+(.+)$/u);
 
-  if (!match) {
-    return null;
-  }
+  if (!match) return null;
 
   return {
     themeNumber: Number(match[1]),
@@ -348,10 +309,7 @@ function parseCategory(title) {
 
 function blockRichText(block) {
   const value = block[block.type];
-
-  if (!value) {
-    return "";
-  }
+  if (!value) return "";
 
   return richTextToPlain(value.rich_text || []);
 }
@@ -371,38 +329,22 @@ async function renderBlocks(blocks) {
       type === "callout"
     ) {
       const text = blockRichText(block);
-
-      if (text) {
-        output.push(text);
-      }
-
-      // IMPORTANT :
-      // On ne descend PAS automatiquement dans les blocs enfants.
-      // C'est ce qui provoquait une avalanche de requêtes / 429.
+      if (text) output.push(text);
       continue;
     }
 
-    if (
-      type === "bulleted_list_item" ||
-      type === "numbered_list_item"
-    ) {
+    if (type === "bulleted_list_item" || type === "numbered_list_item") {
       const text = blockRichText(block);
-
-      if (text) {
-        output.push(`• ${text}`);
-      }
-
+      if (text) output.push(`• ${text}`);
       continue;
     }
 
     if (type === "to_do") {
       const text = blockRichText(block);
-
       if (text) {
         const checked = block.to_do?.checked ? "☑" : "☐";
         output.push(`${checked} ${text}`);
       }
-
       continue;
     }
 
@@ -415,11 +357,7 @@ async function renderBlocks(blocks) {
       const text = block.code?.rich_text
         ? richTextToPlain(block.code.rich_text)
         : "";
-
-      if (text) {
-        output.push(text);
-      }
-
+      if (text) output.push(text);
       continue;
     }
   }
@@ -429,7 +367,6 @@ async function renderBlocks(blocks) {
 
 async function getPageContent(pageId) {
   const blocks = await getChildren(pageId);
-
   return renderBlocks(blocks);
 }
 
@@ -444,17 +381,10 @@ await walkPages(ROOT_PAGE_ID);
 
 console.log(`📄 Pages trouvées : ${records.length}`);
 
-// ------------------------------------------------------------
-// Thèmes
-// ------------------------------------------------------------
-
 const themes = records
   .map(record => {
     const parsed = parseTheme(record.title);
-
-    if (!parsed) {
-      return null;
-    }
+    if (!parsed) return null;
 
     return {
       ...record,
@@ -468,22 +398,13 @@ const themes = records
 console.log(`🏛️ Thèmes détectés : ${themes.length}`);
 
 if (!themes.length) {
-  throw new Error(
-    "Aucun thème détecté. data.js ne sera PAS modifié."
-  );
+  throw new Error("Aucun thème détecté. data.js ne sera PAS modifié.");
 }
-
-// ------------------------------------------------------------
-// Catégories
-// ------------------------------------------------------------
 
 const categories = records
   .map(record => {
     const parsed = parseCategory(record.title);
-
-    if (!parsed) {
-      return null;
-    }
+    if (!parsed) return null;
 
     return {
       ...record,
@@ -494,37 +415,17 @@ const categories = records
 
 console.log(`📂 Catégories détectées : ${categories.length}`);
 
-// ------------------------------------------------------------
-// Fiches
-// ------------------------------------------------------------
-
-const themeById = new Map(
-  themes.map(theme => [theme.id, theme])
-);
-
-const categoryById = new Map(
-  categories.map(category => [category.id, category])
-);
+const themeById = new Map(themes.map(theme => [theme.id, theme]));
+const categoryById = new Map(categories.map(category => [category.id, category]));
 
 const ficheRecords = records.filter(record => {
-  // Une fiche doit appartenir à au moins un thème.
   const theme = record.ancestry
     .map(id => themeById.get(id))
     .find(Boolean);
 
-  if (!theme) {
-    return false;
-  }
-
-  // Les thèmes eux-mêmes ne sont pas des fiches.
-  if (theme.id === record.id) {
-    return false;
-  }
-
-  // Une catégorie n'est pas une fiche.
-  if (categoryById.has(record.id)) {
-    return false;
-  }
+  if (!theme) return false;
+  if (theme.id === record.id) return false;
+  if (categoryById.has(record.id)) return false;
 
   return true;
 });
@@ -538,62 +439,34 @@ console.log(`📝 Fiches détectées : ${ficheRecords.length}`);
 const outputThemes = [];
 
 for (const theme of themes) {
-  console.log(
-    `\n🏛️ Thème ${theme.number} — ${theme.title}`
-  );
+  console.log(`\n🏛️ Thème ${theme.number} — ${theme.title}`);
 
   const themeCategories = categories
     .filter(category => {
-      if (
-        category.themeNumber !== theme.number
-      ) {
-        return false;
-      }
-
+      if (category.themeNumber !== theme.number) return false;
       return category.ancestry.includes(theme.id);
     })
-    .sort(
-      (a, b) =>
-        a.categoryNumber - b.categoryNumber
-    );
+    .sort((a, b) => a.categoryNumber - b.categoryNumber);
 
-  console.log(
-    `   📂 ${themeCategories.length} catégories`
-  );
+  console.log(`   📂 ${themeCategories.length} catégories`);
 
   const outputCategories = [];
 
   for (const category of themeCategories) {
-    console.log(
-      `   📁 ${category.code} — ${category.title}`
-    );
+    console.log(`   📁 ${category.code} — ${category.title}`);
 
     const fiches = ficheRecords
-      .filter(fiche => {
-        if (!fiche.ancestry.includes(category.id)) {
-          return false;
-        }
-
-        return true;
-      })
+      .filter(fiche => fiche.ancestry.includes(category.id))
       .sort((a, b) =>
-        a.title.localeCompare(
-          b.title,
-          "fr",
-          { sensitivity: "base" }
-        )
+        a.title.localeCompare(b.title, "fr", { sensitivity: "base" })
       );
 
-    console.log(
-      `      📝 ${fiches.length} fiches`
-    );
+    console.log(`      📝 ${fiches.length} fiches`);
 
     const outputFiches = [];
 
     for (const fiche of fiches) {
-      console.log(
-        `         → ${fiche.title}`
-      );
+      console.log(`         → ${fiche.title}`);
 
       const content = await getPageContent(fiche.id);
 
@@ -643,8 +516,7 @@ for (const theme of outputThemes) {
 // ============================================================
 
 const totalCategories = outputThemes.reduce(
-  (sum, theme) =>
-    sum + theme.categories.length,
+  (sum, theme) => sum + theme.categories.length,
   0
 );
 
@@ -652,8 +524,7 @@ const totalFiches = outputThemes.reduce(
   (sum, theme) =>
     sum +
     theme.categories.reduce(
-      (catSum, category) =>
-        catSum + category.fiches.length,
+      (catSum, category) => catSum + category.fiches.length,
       0
     ),
   0
@@ -677,25 +548,15 @@ if (outputThemes.length < 5) {
 // Écriture data.js
 // ============================================================
 
-const generated = `// Généré automatiquement depuis Notion.
-// Ne pas modifier manuellement.
-
-const DATA = ${JSON.stringify(
+const generated = `// Généré automatiquement depuis Notion.\n// Ne pas modifier manuellement.\n\nconst DATA = ${JSON.stringify(
   {
     themes: outputThemes,
     ficheIndex
   },
   null,
   2
-)};
-`;
+)};\n`;
 
-await fs.writeFile(
-  OUTPUT_FILE,
-  generated,
-  "utf8"
-);
+await fs.writeFile(OUTPUT_FILE, generated, "utf8");
 
-console.log(
-  `✅ ${OUTPUT_FILE} généré avec succès.`
-);
+console.log(`✅ ${OUTPUT_FILE} généré avec succès.`);
