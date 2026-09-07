@@ -116,7 +116,7 @@ async function getChildren(blockId) {
 
 function childPageTitle(block) { return cleanTitle(block.child_page?.title || ""); }
 function parseNumberedTitle(title) {
-  const match = cleanTitle(title).match(/^\s*(\d+(?:\.\d+)*)\.?\s+(.+)$/u);
+  const match = cleanTitle(title).match(/^(?:[^\d\n]*?)(\d+(?:\.\d+)*)\.?\s+(.+)$/u);
   return match ? { code: match[1], title: match[2].trim() } : null;
 }
 function blockRichText(block) {
