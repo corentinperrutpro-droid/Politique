@@ -62,6 +62,14 @@ async function notion(path, options = {}) {
 
 function cleanTitle(title = "") { return title.replace(/\s+/g, " ").trim(); }
 function richTextToPlain(richText = []) { return richText.map(item => item?.plain_text || "").join("").trim(); }
+function escapeHtml(value = "") {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
 function normalizeId(id) { return String(id || "").replace(/-/g, "").toLowerCase(); }
 function sameId(a, b) { return normalizeId(a) === normalizeId(b); }
 
@@ -124,21 +132,36 @@ function blockRichText(block) {
   return richTextToPlain(value?.rich_text || []);
 }
 
+function blockToHtml(block, text) {
+  const safe = escapeHtml(text);
+  switch (block.type) {
+    case "paragraph": return text ? `<p>${safe}</p>` : "";
+    case "heading_1": return text ? `<h2>${safe}</h2>` : "";
+    case "heading_2": return text ? `<h3>${safe}</h3>` : "";
+    case "heading_3": return text ? `<h4>${safe}</h4>` : "";
+    case "quote": return text ? `<blockquote>${safe}</blockquote>` : "";
+    case "callout": return text ? `<blockquote>${safe}</blockquote>` : "";
+    case "bulleted_list_item": return text ? `<ul><li>${safe}</li></ul>` : "";
+    case "numbered_list_item": return text ? `<ol><li>${safe}</li></ol>` : "";
+    case "to_do": return text ? `<p>☐ ${safe}</p>` : "";
+    case "divider": return "<hr>";
+    case "code": return text ? `<pre><code>${safe}</code></pre>` : "";
+    default: return "";
+  }
+}
+
 async function renderBlocks(blocks) {
   const output = [];
   for (const block of blocks) {
     const text = blockRichText(block);
-    if (["paragraph", "heading_1", "heading_2", "heading_3", "quote", "callout"].includes(block.type) && text) output.push(text);
-    else if (["bulleted_list_item", "numbered_list_item"].includes(block.type) && text) output.push(`• ${text}`);
-    else if (block.type === "to_do" && text) output.push(`${block.to_do?.checked ? "☑" : "☐"} ${text}`);
-    else if (block.type === "divider") output.push("---");
-    else if (block.type === "code" && text) output.push(text);
+    const rendered = blockToHtml(block, text);
+    if (rendered) output.push(rendered);
     if (block.has_children) {
       const nested = await renderBlocks(await getChildren(block.id));
       if (nested) output.push(nested);
     }
   }
-  return output.join("\n\n").trim();
+  return output.join("\n").trim();
 }
 
 async function buildNode(pageId, title, parentId, depth, path) {
