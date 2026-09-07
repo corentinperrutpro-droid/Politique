@@ -18,10 +18,9 @@ const OUTPUT_FILE = "data.js";
 // ============================================================
 
 const MAX_RETRIES = 5;
-// Notion autorise plusieurs requêtes par seconde : on évite
-// l'attente excessive de 1,8 s qui rendait la synchronisation
-// beaucoup trop lente, tout en gardant une marge de sécurité.
-const MIN_REQUEST_GAP_MS = 400;
+// Rythme volontairement prudent pour éviter les 429 sans imposer
+// une attente inutilement longue à chaque requête.
+const MIN_REQUEST_GAP_MS = 300;
 const REQUEST_TIMEOUT_MS = 30000;
 
 let lastRequestAt = 0;
@@ -521,71 +520,13 @@ for (const theme of themes) {
 }
 
 // ============================================================
-// Index de recherche
+// Écriture
 // ============================================================
 
-const ficheIndex = {};
+const output = `window.POLITIQUE_DATA = ${JSON.stringify({
+  themes: outputThemes
+}, null, 2)};\n`;
 
-for (const theme of outputThemes) {
-  for (const category of theme.categories) {
-    for (const fiche of category.fiches) {
-      ficheIndex[fiche.id] = {
-        ...fiche,
-        themeNumber: theme.number,
-        themeTitle: theme.title,
-        categoryCode: category.code,
-        categoryTitle: category.title
-      };
-    }
-  }
-}
+await fs.writeFile(OUTPUT_FILE, output, "utf8");
 
-// ============================================================
-// Validation
-// ============================================================
-
-const totalCategories = outputThemes.reduce(
-  (sum, theme) => sum + theme.categories.length,
-  0
-);
-
-const totalFiches = outputThemes.reduce(
-  (sum, theme) =>
-    sum +
-    theme.categories.reduce(
-      (catSum, category) => catSum + category.fiches.length,
-      0
-    ),
-  0
-);
-
-console.log("\n==============================");
-console.log("📊 SYNCHRONISATION TERMINÉE");
-console.log("==============================");
-console.log(`🏛️ Thèmes     : ${outputThemes.length}`);
-console.log(`📂 Catégories : ${totalCategories}`);
-console.log(`📝 Fiches     : ${totalFiches}`);
-console.log("==============================\n");
-
-if (outputThemes.length < 5) {
-  throw new Error(
-    `Seulement ${outputThemes.length} thèmes exportés. data.js ne sera PAS modifié.`
-  );
-}
-
-// ============================================================
-// Écriture data.js
-// ============================================================
-
-const generated = `// Généré automatiquement depuis Notion.\n// Ne pas modifier manuellement.\n\nconst DATA = ${JSON.stringify(
-  {
-    themes: outputThemes,
-    ficheIndex
-  },
-  null,
-  2
-)};\n`;
-
-await fs.writeFile(OUTPUT_FILE, generated, "utf8");
-
-console.log(`✅ ${OUTPUT_FILE} généré avec succès.`);
+console.log(`\n✅ ${OUTPUT_FILE} généré avec succès.`);
