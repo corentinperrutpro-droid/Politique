@@ -189,7 +189,6 @@ async function collectPageTree() {
   const root = pages.find(page => page.id === ROOT_PAGE_ID);
 
   if (!root) {
-    // Le root peut être absent du Search selon le partage Notion.
     const rootPage = await getPage(ROOT_PAGE_ID);
     walk(rootPage, null, 0, []);
   } else {
@@ -199,8 +198,10 @@ async function collectPageTree() {
   return records;
 }
 
+// Un thème est strictement « N. Titre ».
+// Le \s+ après le point évite de confondre « 2.3 Catégorie » avec un thème.
 function parseTheme(title) {
-  const match = title.match(/(?:^|\s)(\d+)\.\s*(.+)$/u);
+  const match = title.match(/^\s*(\d+)\.\s+(.+)$/u);
   if (!match) return null;
   const number = Number(match[1]);
   if (!Number.isInteger(number)) return null;
@@ -208,7 +209,7 @@ function parseTheme(title) {
 }
 
 function parseCategory(title) {
-  const match = title.match(/(?:^|\s)(\d+)\.(\d+)\s+(.+)$/u);
+  const match = title.match(/^\s*(\d+)\.(\d+)\s+(.+)$/u);
   if (!match) return null;
   return {
     themeNumber: Number(match[1]),
@@ -279,7 +280,7 @@ const themes = records
   })
   .filter(Boolean)
   .filter(theme => theme.id !== ROOT_PAGE_ID)
-  .sort((a, b) => a.number - b.number);
+  .sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
 
 console.log(`🏛️ Thèmes détectés : ${themes.length}`);
 if (!themes.length) throw new Error("Aucun thème détecté. data.js ne sera PAS modifié.");
@@ -289,7 +290,8 @@ const categories = records
     const parsed = parseCategory(record.title);
     return parsed ? { ...record, ...parsed } : null;
   })
-  .filter(Boolean);
+  .filter(Boolean)
+  .sort((a, b) => a.themeNumber - b.themeNumber || a.categoryNumber - b.categoryNumber || a.id.localeCompare(b.id));
 
 console.log(`📂 Catégories détectées : ${categories.length}`);
 
@@ -305,13 +307,14 @@ const ficheRecords = records.filter(record => {
 console.log(`📝 Fiches détectées : ${ficheRecords.length}`);
 
 const outputThemes = [];
+const outputFiches = [];
 
 for (const theme of themes) {
   console.log(`\n🏛️ Thème ${theme.number} — ${theme.title}`);
 
   const themeCategories = categories
     .filter(category => category.themeNumber === theme.number && category.ancestry.includes(theme.id))
-    .sort((a, b) => a.categoryNumber - b.categoryNumber);
+    .sort((a, b) => a.categoryNumber - b.categoryNumber || a.id.localeCompare(b.id));
 
   console.log(`   📂 ${themeCategories.length} catégories`);
   const outputCategories = [];
@@ -324,19 +327,39 @@ for (const theme of themes) {
       .sort((a, b) => a.title.localeCompare(b.title, "fr", { sensitivity: "base" }));
 
     console.log(`      📝 ${fiches.length} fiches`);
-    const outputFiches = [];
+    const outputCategory = { code: category.code, nom: category.title };
+    outputCategories.push(outputCategory);
 
     for (const fiche of fiches) {
       console.log(`         → ${fiche.title}`);
-      outputFiches.push({ id: fiche.id, title: fiche.title, content: await getPageContent(fiche.id) });
+      const html = await getPageContent(fiche.id);
+      outputFiches.push({
+        id: fiche.id,
+        titre: fiche.title,
+        cat: category.code,
+        theme: theme.number,
+        html
+      });
     }
-
-    outputCategories.push({ code: category.code, title: category.title, fiches: outputFiches });
   }
 
-  outputThemes.push({ number: theme.number, title: theme.title, categories: outputCategories });
+  outputThemes.push({
+    num: theme.number,
+    titre: theme.title,
+    emoji: "",
+    notionId: theme.id,
+    statut: "",
+    fiches: themeCategories.reduce((count, category) => {
+      return count + ficheRecords.filter(fiche => fiche.ancestry.includes(category.id)).length;
+    }, 0),
+    categories: outputCategories
+  });
 }
 
-const output = `window.POLITIQUE_DATA = ${JSON.stringify({ themes: outputThemes }, null, 2)};\n`;
+if (!outputFiches.length) {
+  throw new Error("Aucune fiche avec contenu détectée. data.js ne sera PAS remplacé.");
+}
+
+const output = `// Données générées depuis Notion — ne pas modifier manuellement.\nconst SITE_DATA = ${JSON.stringify({ themes: outputThemes, fiches: outputFiches }, null, 2)};\n`;
 await fs.writeFile(OUTPUT_FILE, output, "utf8");
-console.log(`\n✅ ${OUTPUT_FILE} généré avec succès.`);
+console.log(`\n✅ ${OUTPUT_FILE} généré avec succès : ${outputFiches.length} fiches.`);
