@@ -11,8 +11,7 @@ const MAX_RETRIES = 5;
 const MIN_REQUEST_GAP_MS = 350;
 const REQUEST_TIMEOUT_MS = 30000;
 
-let lastRequestAt = 0;
-let requestQueue = Promise.resolve();
+let nextRequestAt = 0;
 const childrenCache = new Map();
 const pageCache = new Map();
 
@@ -20,67 +19,64 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function queueRequest(fn) {
-  const run = requestQueue.then(fn, fn);
-  requestQueue = run.catch(() => {});
-  return run;
+async function waitForRequestSlot() {
+  const now = Date.now();
+  const startAt = Math.max(now, nextRequestAt);
+  nextRequestAt = startAt + MIN_REQUEST_GAP_MS;
+  if (startAt > now) await sleep(startAt - now);
 }
 
 async function notion(path) {
-  return queueRequest(async () => {
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      const elapsed = Date.now() - lastRequestAt;
-      if (elapsed < MIN_REQUEST_GAP_MS) await sleep(MIN_REQUEST_GAP_MS - elapsed);
-      lastRequestAt = Date.now();
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await waitForRequestSlot();
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-      let response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response;
 
-      try {
-        response = await fetch(`https://api.notion.com/v1${path}`, {
-          headers: {
-            Authorization: `Bearer ${NOTION_TOKEN}`,
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
-          },
-          signal: controller.signal
-        });
-      } catch (error) {
-        clearTimeout(timeout);
-        if (attempt >= MAX_RETRIES) {
-          throw new Error(`Erreur réseau Notion après ${MAX_RETRIES} tentatives sur ${path}: ${error?.message || error}`);
-        }
-        const waitMs = Math.min(2000 * 2 ** attempt, 30000);
-        console.log(`Erreur réseau Notion sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
-        await sleep(waitMs);
-        continue;
-      }
-
+    try {
+      response = await fetch(`https://api.notion.com/v1${path}`, {
+        headers: {
+          Authorization: `Bearer ${NOTION_TOKEN}`,
+          "Notion-Version": "2022-06-28",
+          "Content-Type": "application/json"
+        },
+        signal: controller.signal
+      });
+    } catch (error) {
       clearTimeout(timeout);
-
-      if (response.ok) return response.json();
-
-      const text = await response.text();
-      const retryAfter = Number(response.headers.get("retry-after"));
-
-      if (response.status === 429 || response.status >= 500) {
-        if (attempt >= MAX_RETRIES) {
-          throw new Error(`Notion API ${response.status} après ${MAX_RETRIES} tentatives sur ${path}: ${text}`);
-        }
-        const base = response.status === 429 ? 30000 : 5000;
-        const cap = response.status === 429 ? 180000 : 60000;
-        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-          ? retryAfter * 1000
-          : Math.min(base * 2 ** attempt, cap);
-        console.log(`Notion API ${response.status} sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
-        await sleep(waitMs);
-        continue;
+      if (attempt >= MAX_RETRIES) {
+        throw new Error(`Erreur réseau Notion après ${MAX_RETRIES} tentatives sur ${path}: ${error?.message || error}`);
       }
-
-      throw new Error(`Notion API ${response.status} sur ${path}: ${text}`);
+      const waitMs = Math.min(2000 * 2 ** attempt, 30000);
+      console.log(`Erreur réseau Notion sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
+      await sleep(waitMs);
+      continue;
     }
-  });
+
+    clearTimeout(timeout);
+
+    if (response.ok) return response.json();
+
+    const text = await response.text();
+    const retryAfter = Number(response.headers.get("retry-after"));
+
+    if (response.status === 429 || response.status >= 500) {
+      if (attempt >= MAX_RETRIES) {
+        throw new Error(`Notion API ${response.status} après ${MAX_RETRIES} tentatives sur ${path}: ${text}`);
+      }
+      const base = response.status === 429 ? 30000 : 5000;
+      const cap = response.status === 429 ? 180000 : 60000;
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(base * 2 ** attempt, cap);
+      console.log(`Notion API ${response.status} sur ${path} — nouvelle tentative dans ${Math.round(waitMs / 1000)}s.`);
+      await sleep(waitMs);
+      continue;
+    }
+
+    throw new Error(`Notion API ${response.status} sur ${path}: ${text}`);
+  }
 }
 
 async function getPage(pageId) {
@@ -152,28 +148,22 @@ async function collectTree() {
     if (visited.has(pageId)) return;
     visited.add(pageId);
 
-    records.push({
-      id: pageId,
-      title: cleanTitle(title),
-      parentId,
-      ancestry,
-      depth
-    });
+    records.push({ id: pageId, title: cleanTitle(title), parentId, ancestry, depth });
 
     const children = await getChildren(pageId);
     const childPages = children.filter(block => block.type === "child_page");
 
-    for (const child of childPages) {
-      await walk(
-        child.id,
-        childPageTitle(child),
-        pageId,
-        [...ancestry, pageId],
-        depth + 1
-      );
-    }
+    // Les appels sont cadencés à ~3/s, mais peuvent être en vol simultanément.
+    // Cela évite d'additionner la latence réseau de chaque branche.
+    await Promise.all(childPages.map(child => walk(
+      child.id,
+      childPageTitle(child),
+      pageId,
+      [...ancestry, pageId],
+      depth + 1
+    )));
 
-    if (records.length % 100 === 0) {
+    if (records.length >= 100 && records.length % 100 === 0) {
       console.log(`   ↳ ${records.length} pages parcourues...`);
     }
   }
@@ -187,7 +177,7 @@ function blockRichText(block) {
   return value ? richTextToPlain(value.rich_text || []) : "";
 }
 
-function renderBlocks(blocks) {
+async function renderBlocks(blocks) {
   const output = [];
 
   for (const block of blocks) {
@@ -204,6 +194,12 @@ function renderBlocks(blocks) {
       output.push("---");
     } else if (type === "code" && text) {
       output.push(text);
+    }
+
+    if (block.has_children) {
+      const children = await getChildren(block.id);
+      const nested = await renderBlocks(children);
+      if (nested) output.push(nested);
     }
   }
 
@@ -277,17 +273,15 @@ for (const theme of themes) {
     console.log(`      📝 ${fiches.length} fiches`);
     outputCategories.push({ code: category.code, nom: category.title });
 
-    for (const fiche of fiches) {
-      console.log(`         → ${fiche.title}`);
-      const html = await getPageContent(fiche.id);
-      outputFiches.push({
-        id: fiche.id,
-        titre: fiche.title,
-        cat: category.code,
-        theme: theme.number,
-        html
-      });
-    }
+    const ficheData = await Promise.all(fiches.map(async fiche => ({
+      id: fiche.id,
+      titre: fiche.title,
+      cat: category.code,
+      theme: theme.number,
+      html: await getPageContent(fiche.id)
+    })));
+
+    outputFiches.push(...ficheData);
   }
 
   outputThemes.push({
@@ -308,7 +302,7 @@ if (!outputFiches.length) throw new Error("Aucune fiche avec contenu détectée.
 
 const emptyContent = outputFiches.filter(fiche => !fiche.html).length;
 console.log(`📦 Fiches avec contenu : ${outputFiches.length - emptyContent}/${outputFiches.length}`);
-if (emptyContent > 0) console.log(`⚠️ ${emptyContent} fiches ont un contenu top-level vide.`);
+if (emptyContent > 0) console.log(`⚠️ ${emptyContent} fiches ont un contenu vide.`);
 
 const output = `// Données générées depuis Notion — ne pas modifier manuellement.\nconst SITE_DATA = ${JSON.stringify({ themes: outputThemes, fiches: outputFiches }, null, 2)};\n`;
 await fs.writeFile(OUTPUT_FILE, output, "utf8");
