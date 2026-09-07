@@ -79,6 +79,10 @@ function isExcludedPublicPage(title = "") {
   const normalized = normalizeTitleForExclusion(title);
   return /^(?:registres?|audit)\b/u.test(normalized);
 }
+function isPublicSpecialTheme(title = "") {
+  const normalized = normalizeTitleForExclusion(title);
+  return normalized.startsWith("rassemblement national — dossier programmatique");
+}
 
 async function getPageTitle(pageId) {
   const data = await notion(`/pages/${pageId}`);
@@ -245,13 +249,16 @@ if (excludedRootPages.length) console.log(`🚫 Pages internes exclues : ${exclu
 root.children = (await Promise.all(rootPages.map(child => buildNode(child.id, childPageTitle(child), canonicalRoot.id, 1, [canonicalRoot.title])))).filter(Boolean);
 sortTree(root);
 
-const themes = root.children.filter(node => parseNumberedTitle(node.title));
+const numberedThemes = root.children.filter(node => parseNumberedTitle(node.title));
+const specialThemes = root.children.filter(node => isPublicSpecialTheme(node.title));
+const themes = [...numberedThemes, ...specialThemes];
 const fiches = themes.flatMap(theme => flattenFiches(theme));
 const totalNodes = themes.reduce((sum, theme) => sum + countNodes(theme), 0);
 const deepest = themes.length ? Math.max(...themes.map(maxDepth)) : 0;
 const withContent = fiches.filter(fiche => fiche.html).length;
 
-console.log(`🏛️ Thèmes détectés : ${themes.length}`);
+console.log(`🏛️ Thèmes numérotés détectés : ${numberedThemes.length}`);
+console.log(`🔵 Rubriques transversales publiques : ${specialThemes.length}`);
 console.log(`🧭 Nœuds documentaires : ${totalNodes}`);
 console.log(`📝 Fiches terminales : ${fiches.length}`);
 console.log(`📦 Fiches avec contenu : ${withContent}/${fiches.length}`);
