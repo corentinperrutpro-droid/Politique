@@ -9,6 +9,7 @@ const REQUEST_TIMEOUT_MS = 30000;
 const MIN_REQUEST_GAP_MS = 350;
 const MAX_DEPTH = 50;
 const ROOT_TITLE = "🏛️ DOCUMENTATION POLITIQUE — Base de Décision d'État";
+const EXCLUDED_PUBLIC_TITLES = new Set(["registres", "audit"]);
 
 if (!NOTION_TOKEN) throw new Error("NOTION_TOKEN manquant.");
 if (!CONFIGURED_ROOT_ID) throw new Error("NOTION_ROOT_PAGE_ID manquant.");
@@ -72,6 +73,7 @@ function escapeHtml(value = "") {
 }
 function normalizeId(id) { return String(id || "").replace(/-/g, "").toLowerCase(); }
 function sameId(a, b) { return normalizeId(a) === normalizeId(b); }
+function isExcludedPublicPage(title = "") { return EXCLUDED_PUBLIC_TITLES.has(cleanTitle(title).toLocaleLowerCase("fr-FR")); }
 
 async function getPageTitle(pageId) {
   const data = await notion(`/pages/${pageId}`);
@@ -165,9 +167,12 @@ async function renderBlocks(blocks) {
 }
 
 async function buildNode(pageId, title, parentId, depth, path) {
+  if (isExcludedPublicPage(title)) return null;
   if (depth > MAX_DEPTH) throw new Error(`Profondeur maximale dépassée (${MAX_DEPTH}) sur ${pageId}.`);
   const blocks = await getChildren(pageId);
-  const childPages = blocks.filter(block => block.type === "child_page" && childPageTitle(block));
+  const childPages = blocks
+    .filter(block => block.type === "child_page" && childPageTitle(block))
+    .filter(block => !isExcludedPublicPage(childPageTitle(block)));
   const node = { id: pageId, title: cleanTitle(title), parentId, depth, path: [...path, cleanTitle(title)], children: [] };
   if (!childPages.length) {
     node.type = "fiche";
@@ -175,7 +180,8 @@ async function buildNode(pageId, title, parentId, depth, path) {
     return node;
   }
   node.type = "folder";
-  node.children = await Promise.all(childPages.map(child => buildNode(child.id, childPageTitle(child), pageId, depth + 1, node.path)));
+  const children = await Promise.all(childPages.map(child => buildNode(child.id, childPageTitle(child), pageId, depth + 1, node.path)));
+  node.children = children.filter(Boolean);
   return node;
 }
 
@@ -211,6 +217,8 @@ function assertTree(root, themes, fiches) {
   const ids = fiches.map(f => normalizeId(f.id));
   if (ids.some((id, i) => ids.indexOf(id) !== i)) throw new Error("IDs de fiches dupliqués détectés. data.js ne sera PAS modifié.");
   if (fiches.some(f => !f.titre || !f.id || !Array.isArray(f.path) || !f.path.length)) throw new Error("Fiches invalides détectées. data.js ne sera PAS modifié.");
+  if (fiches.some(f => f.path.some(isExcludedPublicPage))) throw new Error("Une fiche publique contient une page interne exclue (Registres/Audit). data.js ne sera PAS modifié.");
+  if (themes.some(theme => isExcludedPublicPage(theme.title))) throw new Error("Une page interne exclue (Registres/Audit) est encore présente parmi les thèmes publics. data.js ne sera PAS modifié.");
   if (!sameId(root.id, CONFIGURED_ROOT_ID)) console.log("ℹ️ Racine canonique différente de l'ID configuré : la racine validée par son titre est utilisée.");
 }
 
@@ -219,11 +227,17 @@ console.log("📚 Lecture de l'arborescence réelle, puis reconstruction locale.
 
 const canonicalRoot = await findCanonicalRoot();
 const rootBlocks = await getChildren(canonicalRoot.id);
-const rootPages = rootBlocks.filter(block => block.type === "child_page" && childPageTitle(block));
+const excludedRootPages = rootBlocks
+  .filter(block => block.type === "child_page" && isExcludedPublicPage(childPageTitle(block)))
+  .map(childPageTitle);
+const rootPages = rootBlocks
+  .filter(block => block.type === "child_page" && childPageTitle(block))
+  .filter(block => !isExcludedPublicPage(childPageTitle(block)));
 const root = { id: canonicalRoot.id, title: canonicalRoot.title, parentId: null, depth: 0, path: [canonicalRoot.title], type: "root", children: [] };
 
 console.log(`📂 Pages directement sous la racine : ${rootPages.length}`);
-root.children = await Promise.all(rootPages.map(child => buildNode(child.id, childPageTitle(child), canonicalRoot.id, 1, [canonicalRoot.title])));
+if (excludedRootPages.length) console.log(`🚫 Pages internes exclues : ${excludedRootPages.join(", ")}`);
+root.children = (await Promise.all(rootPages.map(child => buildNode(child.id, childPageTitle(child), canonicalRoot.id, 1, [canonicalRoot.title])))).filter(Boolean);
 sortTree(root);
 
 const themes = root.children.filter(node => parseNumberedTitle(node.title));
