@@ -58,10 +58,6 @@ function htmlToSearchText(value) {
   return (template.content.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-function nodeFicheCount(node) {
-  return fiches.filter(fiche => fiche.path?.includes(node.title)).length;
-}
-
 function openTheme(id) {
   window.location.hash = `theme/${encodeURIComponent(id)}`;
 }
@@ -73,9 +69,9 @@ function openFiche(id) {
 function renderThemes(list = themes) {
   if (!themesContainer) return;
   themesContainer.innerHTML = list.map(theme => {
-    const parsed = String(theme.title || "").match(/^(\d+)\.\s*(.*)$/u);
-    const number = parsed ? String(parsed[1]).padStart(2, "0") : "";
-    const title = parsed ? parsed[2] : theme.title;
+    const parsed = String(theme.title || "").match(/^(\D*?)(\d+)\.\s*(.*)$/u);
+    const number = parsed ? String(parsed[2]).padStart(2, "0") : "";
+    const title = parsed ? parsed[3] : theme.title;
     return `
       <article class="theme-card" tabindex="0" role="link" data-theme="${escapeHtml(theme.id)}">
         <span class="theme-number">${escapeHtml(number)}</span>
@@ -219,14 +215,49 @@ function renderFicheDetail(id) {
   try { decodedId = decodeURIComponent(id); } catch { decodedId = id; }
   const f = fiches.find(x => String(x.id) === String(decodedId));
   if (!f) return `<p>Fiche introuvable. <a href="#explorer">Retour</a></p>`;
+  const path = f.path || [];
+  const parentPath = path.length > 1 ? path.slice(0, -1).join(" → ") : "Base de décision publique";
   return `
-    ${breadcrumb(f.path?.join(" → ") || "")}
-    <div class="detail-head">
-      <span class="eyebrow">FICHE DOCUMENTAIRE</span>
-      <h1 class="detail-title fiche-title">${escapeHtml(f.titre)}</h1>
-      <p class="detail-meta">${escapeHtml((f.path || []).join(" → "))}</p>
-    </div>
-    <div class="fiche-body">${sanitizeFicheHtml(f.html || "<p>Contenu vide dans Notion.</p>")}</div>`;
+    ${breadcrumb(parentPath, "Fiche")}
+    <div class="fiche-layout">
+      <aside class="fiche-aside">
+        <div class="fiche-aside-card">
+          <span class="eyebrow">FICHE DOCUMENTAIRE</span>
+          <div class="fiche-aside-title">Navigation</div>
+          <nav class="fiche-toc" id="fiche-toc" aria-label="Sommaire de la fiche"></nav>
+        </div>
+        <div class="fiche-source-card">
+          <span class="fiche-source-label">CHEMIN DOCUMENTAIRE</span>
+          <p>${escapeHtml(path.join(" → "))}</p>
+          <a href="https://app.notion.com/p/${encodeURIComponent(f.id)}" target="_blank" rel="noopener noreferrer">Ouvrir la source Notion →</a>
+        </div>
+      </aside>
+      <article class="fiche-article">
+        <header class="fiche-article-head">
+          <span class="eyebrow">DOCUMENTATION POLITIQUE</span>
+          <h1 class="detail-title fiche-title">${escapeHtml(f.titre)}</h1>
+          <p class="fiche-intro">${escapeHtml(parentPath)}</p>
+        </header>
+        <div class="fiche-body">${sanitizeFicheHtml(f.html || "<p>Contenu vide dans Notion.</p>")}</div>
+      </article>
+    </div>`;
+}
+
+function enhanceFiche() {
+  const body = detailView.querySelector(".fiche-body");
+  const toc = detailView.querySelector("#fiche-toc");
+  if (!body || !toc) return;
+  const headings = Array.from(body.querySelectorAll("h2, h3, h4"));
+  if (!headings.length) {
+    toc.innerHTML = `<span class="fiche-toc-empty">Lecture libre</span>`;
+    return;
+  }
+  toc.innerHTML = headings.map((heading, index) => {
+    const id = `section-${index + 1}`;
+    heading.id = id;
+    const level = heading.tagName === "H2" ? 0 : heading.tagName === "H3" ? 1 : 2;
+    return `<a class="toc-link toc-level-${level}" href="#${id}">${escapeHtml(heading.textContent)}</a>`;
+  }).join("");
 }
 
 function router() {
@@ -237,6 +268,7 @@ function router() {
   } else if (hash.startsWith("fiche/")) {
     detailView.innerHTML = renderFicheDetail(hash.slice(6));
     showDetail();
+    enhanceFiche();
   } else {
     hideDetail();
   }
