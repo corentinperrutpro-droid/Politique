@@ -14,11 +14,15 @@ if (!ROOT_PAGE_ID) {
 const OUTPUT_FILE = "data.js";
 
 // ============================================================
-// Réglages anti-429
+// Réglages anti-429 / réseau
 // ============================================================
 
 const MAX_RETRIES = 5;
-const MIN_REQUEST_GAP_MS = 1800;
+// Notion autorise plusieurs requêtes par seconde : on évite
+// l'attente excessive de 1,8 s qui rendait la synchronisation
+// beaucoup trop lente, tout en gardant une marge de sécurité.
+const MIN_REQUEST_GAP_MS = 400;
+const REQUEST_TIMEOUT_MS = 30000;
 
 let lastRequestAt = 0;
 
@@ -59,13 +63,38 @@ async function notion(path) {
 
       lastRequestAt = Date.now();
 
-      const response = await fetch(`https://api.notion.com/v1${path}`, {
-        headers: {
-          Authorization: `Bearer ${NOTION_TOKEN}`,
-          "Notion-Version": "2022-06-28",
-          "Content-Type": "application/json"
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      let response;
+
+      try {
+        response = await fetch(`https://api.notion.com/v1${path}`, {
+          headers: {
+            Authorization: `Bearer ${NOTION_TOKEN}`,
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+          },
+          signal: controller.signal
+        });
+      } catch (error) {
+        clearTimeout(timeout);
+
+        if (attempt >= MAX_RETRIES) {
+          throw new Error(
+            `Erreur réseau Notion après ${MAX_RETRIES} tentatives sur ${path}: ${error?.message || error}`
+          );
         }
-      });
+
+        const waitMs = Math.min(2000 * Math.pow(2, attempt), 30000);
+        console.log(
+          `Erreur réseau Notion sur ${path} — nouvelle tentative ${attempt + 1}/${MAX_RETRIES} dans ${Math.round(waitMs / 1000)}s.`
+        );
+        await sleep(waitMs);
+        continue;
+      }
+
+      clearTimeout(timeout);
 
       if (response.ok) {
         return response.json();
